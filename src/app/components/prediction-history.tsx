@@ -14,6 +14,8 @@ interface PredictionHistoryProps {
 }
 
 export function PredictionHistory({ logs }: PredictionHistoryProps) {
+  const shouldScroll = logs.length > 10;
+
   const getBadgeVariant = (prediction: string) => {
     switch (prediction) {
       case 'Normal': return 'default';
@@ -27,7 +29,8 @@ export function PredictionHistory({ logs }: PredictionHistoryProps) {
   return (
     <Card className="p-6">
       <h3 className="text-xl font-bold mb-4">Recent Predictions</h3>
-      <div className="overflow-x-auto">
+      <div className={`${shouldScroll ? 'max-h-[28rem] overflow-y-auto pr-2' : ''}`}>
+        <div className="overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow>
@@ -62,6 +65,7 @@ export function PredictionHistory({ logs }: PredictionHistoryProps) {
             )}
           </TableBody>
         </Table>
+        </div>
       </div>
     </Card>
   );

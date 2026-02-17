@@ -92,7 +92,7 @@ This pattern doesn't match known attacks but has multiple unusual characteristic
 When zero-day is detected:
 - MLP Model: Predicts "Zero-Day"
 - CNN Model: Predicts "Zero-Day"
-- XGBoost Model: Predicts "Zero-Day"
+- LSTM Model: Predicts "Zero-Day"
 - Ensemble: Majority vote = "Zero-Day"
 
 ## Testing

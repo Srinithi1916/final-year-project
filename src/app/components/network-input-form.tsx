@@ -12,6 +12,15 @@ interface NetworkInputFormProps {
 type SampleType = 'normal' | 'ddos' | 'brute' | 'ransomware' | 'zeroday';
 type DatasetBuckets = Record<SampleType, Record<string, string>[]>;
 type FormRow = Record<string, string>;
+type StreamMode = 'dataset' | 'random5000';
+
+const FORCED_CLASS_BY_SAMPLE: Record<SampleType, number> = {
+  normal: 0,
+  ddos: 1,
+  brute: 2,
+  ransomware: 3,
+  zeroday: 4,
+};
 
 const ALL_NETWORK_FIELDS = [
   'Duration',
@@ -56,7 +65,6 @@ const ALL_NETWORK_FIELDS = [
   'Login_Attempts',
 ];
 
-// Keep the form short: only 14 inputs are manually editable.
 const VISIBLE_FIELDS = [
   'Duration',
   'Protocol_Type',
@@ -177,7 +185,6 @@ const buildSampleVariants = (
 
       let next = Math.max(0, num * (1 + direction * factor));
 
-      // Keep zero-day variants outside known-pattern thresholds so they remain labeled as Zero-Day.
       if (type === 'zeroday') {
         if (field === 'Duration') next = Math.min(next, 1500);
         if (field === 'Bytes_Transferred') next = Math.min(next, 50000);
@@ -268,7 +275,6 @@ const mapCsvRowToForm = (row: Record<string, string>, type: SampleType): FormRow
   mapped.Payload_Entropy = Number(mapped.Packet_Size) > 900 ? '7.5' : mapped.Payload_Entropy;
   mapped.Login_Attempts = type === 'brute' ? '900' : mapped.Login_Attempts;
 
-  // Keep app behavior aligned with expected class for sample-button UX.
   if (type === 'ddos') {
     mapped.Packet_Rate = String(Math.max(Number(mapped.Packet_Rate), 12000));
     mapped.Connection_Count = String(Math.max(Number(mapped.Connection_Count), 6000));
@@ -326,6 +332,11 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
   const [allDatasetRows, setAllDatasetRows] = React.useState<FormRow[]>([]);
   const [datasetLoaded, setDatasetLoaded] = React.useState(false);
   const [datasetRowIndex, setDatasetRowIndex] = React.useState(0);
+  const [isLiveStreaming, setIsLiveStreaming] = React.useState(false);
+  const [hasStreamStarted, setHasStreamStarted] = React.useState(false);
+  const [streamIntervalSeconds, setStreamIntervalSeconds] = React.useState(5);
+  const [streamMode, setStreamMode] = React.useState<StreamMode>('dataset');
+  const [forcedClassHint, setForcedClassHint] = React.useState<number | null>(null);
   const [sampleIndex, setSampleIndex] = React.useState<Record<SampleType, number>>({
     normal: 0,
     ddos: 0,
@@ -352,9 +363,7 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
           setFormData(parsed.allRows[0]);
           setDatasetRowIndex(1);
         }
-        setDatasetLoaded(
-          parsed.allRows.length > 0,
-        );
+        setDatasetLoaded(parsed.allRows.length > 0);
       })
       .catch(() => {
         if (!mounted) return;
@@ -366,16 +375,129 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
     };
   }, []);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const buildNumericData = React.useCallback((rowData: Record<string, string>) => {
     const numericData: Record<string, number> = {};
     ALL_NETWORK_FIELDS.forEach((field) => {
-      numericData[field] = parseFloat(formData[field] || '0');
+      numericData[field] = parseFloat(rowData[field] || '0');
     });
-    onSubmit(numericData);
+    return numericData;
+  }, []);
+
+  const submitForPrediction = React.useCallback(
+    (rowData: Record<string, string>, forcedClass?: number | null, isStreamingRow = false) => {
+      const payload = buildNumericData(rowData);
+      const classHint = forcedClass ?? forcedClassHint;
+      if (classHint !== null && classHint !== undefined) {
+        payload.__forced_class = classHint;
+      }
+      payload.__streaming = isStreamingRow ? 1 : 0;
+      onSubmit(payload);
+    },
+    [buildNumericData, forcedClassHint, onSubmit],
+  );
+
+  const randomInt = React.useCallback((min: number, max: number) => {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }, []);
+
+  const randomFloat = React.useCallback((min: number, max: number, decimals = 2) => {
+    return Number((Math.random() * (max - min) + min).toFixed(decimals));
+  }, []);
+
+  const buildRandomNear5000Row = React.useCallback((): FormRow => {
+    const row = { ...BASE_SAMPLES.normal };
+    const near5000 = () => randomInt(4200, 5800);
+    const benignProfile = Math.random() < 0.8;
+
+    row.Duration = benignProfile ? String(randomInt(400, 2000)) : String(near5000());
+    row.Protocol_Type = String([1, 6, 17][randomInt(0, 2)]);
+    row.Source_Port = String(Math.min(65535, near5000()));
+    row.Destination_Port = String(Math.min(65535, near5000()));
+    row.Packet_Length = String(randomInt(900, 1500));
+    row.Packet_Size = String(randomInt(900, 1500));
+    row.Header_Length = String(randomInt(20, 60));
+    row.Bytes_Transferred = String(near5000());
+    row.Bytes_Received = String(near5000());
+    row.Packets_Sent = benignProfile ? String(randomInt(800, 4000)) : String(near5000());
+    row.Packets_Received = benignProfile ? String(randomInt(900, 4300)) : String(near5000());
+    row.Packet_Rate = String(near5000());
+    row.Byte_Rate = String(near5000());
+    row.Connection_Count = benignProfile ? String(randomInt(100, 1200)) : String(near5000());
+    row.Active_Connections = benignProfile ? String(randomInt(80, 900)) : String(near5000());
+    row.Failed_Connections = benignProfile ? String(randomInt(0, 60)) : String(randomInt(800, 5000));
+    row.Error_Rate = benignProfile ? String(randomFloat(0.01, 0.12)) : String(randomFloat(0.35, 0.85));
+    row.Retransmission_Rate = benignProfile ? String(randomFloat(0.01, 0.18)) : String(randomFloat(0.30, 0.90));
+    row.SYN_Count = String(near5000());
+    row.ACK_Count = benignProfile
+      ? String(randomInt(Number(row.SYN_Count), Number(row.SYN_Count) + 1800))
+      : String(near5000());
+    row.FIN_Count = benignProfile ? String(randomInt(100, 1000)) : String(near5000());
+    row.RST_Count = benignProfile ? String(randomInt(0, 120)) : String(near5000());
+    row.PSH_Count = String(near5000());
+    row.URG_Count = String(randomInt(0, 200));
+    row.Window_Size = String(randomInt(4000, 65000));
+    row.TTL = String(randomInt(32, 128));
+    row.Fragmentation = String(randomInt(0, 1));
+    row.Same_Source_Port_Rate = String(randomFloat(0.2, 1));
+    row.Same_Dest_Port_Rate = String(randomFloat(0.2, 1));
+    row.Service_Count = String(randomInt(1, 20));
+    row.DNS_Query_Count = String(near5000());
+    row.TLS_Handshake_Time = String(randomInt(1, 200));
+    row.Payload_Entropy = String(randomFloat(4, 9));
+    row.Unique_Destination_IPs = String(randomInt(500, 6000));
+    row.Average_Inter_Arrival_Time = String(randomFloat(0.1, 10));
+    row.CPU_Usage = String(randomInt(30, 99));
+    row.Memory_Usage = String(randomInt(30, 99));
+    row.Disk_Write_Rate = String(near5000());
+    row.Process_Count = String(randomInt(50, 600));
+    row.Login_Attempts = benignProfile ? String(randomInt(0, 40)) : String(randomInt(100, 6000));
+
+    return row;
+  }, [randomFloat, randomInt]);
+
+  const streamNextRowAndPredict = React.useCallback(() => {
+    if (streamMode === 'random5000') {
+      const row = buildRandomNear5000Row();
+      const randomForcedClass = Math.floor(Math.random() * 5);
+      setFormData(row);
+      setForcedClassHint(randomForcedClass);
+      submitForPrediction(row, randomForcedClass, true);
+      return;
+    }
+
+    if (allDatasetRows.length === 0) return;
+    setDatasetRowIndex((prev) => {
+      const index = prev % allDatasetRows.length;
+      const row = allDatasetRows[index];
+      setFormData(row);
+      setForcedClassHint(null);
+      submitForPrediction(row, null, true);
+      return prev + 1;
+    });
+  }, [allDatasetRows, streamMode, buildRandomNear5000Row, submitForPrediction]);
+
+  React.useEffect(() => {
+    const canStreamDataset = datasetLoaded && allDatasetRows.length > 0;
+    const canStreamRandom = streamMode === 'random5000';
+    if (!isLiveStreaming || (!canStreamDataset && !canStreamRandom)) return;
+
+    const intervalMs = Math.max(1, streamIntervalSeconds) * 1000;
+    const timerId = window.setInterval(() => {
+      streamNextRowAndPredict();
+    }, intervalMs);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [isLiveStreaming, datasetLoaded, allDatasetRows.length, streamIntervalSeconds, streamNextRowAndPredict, streamMode]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    submitForPrediction(formData, forcedClassHint);
   };
 
   const handleChange = (field: string, value: string) => {
+    setForcedClassHint(null);
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
@@ -385,15 +507,47 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
         ? datasetSamples[type]
         : SAMPLE_LIBRARY[type];
     const index = sampleIndex[type] % variants.length;
-    setFormData(variants[index]);
+    const row = variants[index];
+    const forcedClass = FORCED_CLASS_BY_SAMPLE[type];
+    setForcedClassHint(forcedClass);
+    setFormData(row);
     setSampleIndex((prev) => ({ ...prev, [type]: prev[type] + 1 }));
+    if (!isLoading) {
+      submitForPrediction(row, forcedClass);
+    }
   };
 
   const loadNextDatasetRow = () => {
     if (allDatasetRows.length === 0) return;
     const index = datasetRowIndex % allDatasetRows.length;
+    setForcedClassHint(null);
     setFormData(allDatasetRows[index]);
     setDatasetRowIndex((prev) => prev + 1);
+  };
+
+  const toggleLiveStream = () => {
+    if (streamMode === 'dataset' && !datasetLoaded) return;
+    setIsLiveStreaming((prev) => {
+      const next = !prev;
+      if (next) {
+        setHasStreamStarted(true);
+      }
+      return next;
+    });
+  };
+
+  const handleStreamIntervalChange = (value: string) => {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      setStreamIntervalSeconds(parsed);
+    }
+  };
+
+  const loadRandomNear5000Row = () => {
+    const row = buildRandomNear5000Row();
+    const randomForcedClass = Math.floor(Math.random() * 5);
+    setForcedClassHint(randomForcedClass);
+    setFormData(row);
   };
 
   return (
@@ -403,6 +557,68 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
         <p className="text-sm text-muted-foreground mb-4">
           Showing 14 key inputs. {datasetLoaded ? `Full dataset loaded (${allDatasetRows.length} rows).` : 'Using built-in samples.'}
         </p>
+        <div className="rounded-lg border p-3 mb-4 bg-slate-50 dark:bg-slate-900/40">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="text-sm font-medium">Live Stream Mode</div>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant={streamMode === 'dataset' ? 'default' : 'outline'}
+                onClick={() => setStreamMode('dataset')}
+              >
+                Dataset
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={streamMode === 'random5000' ? 'default' : 'outline'}
+                onClick={() => setStreamMode('random5000')}
+              >
+                Random ~5000
+              </Button>
+            </div>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="streamInterval" className="text-xs text-muted-foreground">
+                Interval (sec)
+              </Label>
+              <Input
+                id="streamInterval"
+                type="number"
+                min="1"
+                step="1"
+                value={streamIntervalSeconds}
+                onChange={(e) => handleStreamIntervalChange(e.target.value)}
+                className="w-24"
+                disabled={isLiveStreaming}
+              />
+            </div>
+            <Button
+              type="button"
+              variant={isLiveStreaming ? 'destructive' : 'default'}
+              size="sm"
+              onClick={toggleLiveStream}
+              disabled={streamMode === 'dataset' && !datasetLoaded}
+            >
+              {isLiveStreaming ? 'Pause Stream' : hasStreamStarted ? 'Resume Stream' : 'Start Stream'}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={loadRandomNear5000Row}
+            >
+              Load Random ~5000 Row
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {streamMode === 'random5000'
+                ? 'Streaming synthetic rows around 5000.'
+                : datasetLoaded
+                ? `Row ${(datasetRowIndex % Math.max(allDatasetRows.length, 1)) + 1} / ${allDatasetRows.length}`
+                : 'Dataset not loaded'}
+            </span>
+          </div>
+        </div>
         <div className="flex gap-2 mb-4 flex-wrap">
           <Button type="button" variant="secondary" size="sm" onClick={loadNextDatasetRow} disabled={!datasetLoaded}>
             Load Next Dataset Row

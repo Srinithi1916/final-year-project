@@ -8,8 +8,8 @@ interface ModelVotingChartProps {
   mlpConfidence: number;
   cnnPrediction: string;
   cnnConfidence: number;
-  xgbPrediction: string;
-  xgbConfidence: number;
+  lstmPrediction: string;
+  lstmConfidence: number;
   finalPrediction: string;
 }
 
@@ -18,17 +18,17 @@ export function ModelVotingChart({
   mlpConfidence,
   cnnPrediction,
   cnnConfidence,
-  xgbPrediction,
-  xgbConfidence,
+  lstmPrediction,
+  lstmConfidence,
   finalPrediction
 }: ModelVotingChartProps) {
-  const votes = [mlpPrediction, cnnPrediction, xgbPrediction];
+  const votes = [mlpPrediction, cnnPrediction, lstmPrediction];
   const finalVoteCount = votes.filter((vote) => vote === finalPrediction).length;
 
   const data = [
     { model: 'MLP', confidence: mlpConfidence, prediction: mlpPrediction },
     { model: 'CNN', confidence: cnnConfidence, prediction: cnnPrediction },
-    { model: 'XGBoost', confidence: xgbConfidence, prediction: xgbPrediction }
+    { model: 'LSTM', confidence: lstmConfidence, prediction: lstmPrediction }
   ];
 
   const getBarColor = (prediction: string) => {
@@ -90,11 +90,11 @@ export function ModelVotingChart({
         </div>
 
         <div className="text-center p-3 bg-green-50 dark:bg-green-950/20 rounded-lg">
-          <div className="text-xs text-muted-foreground mb-1">XGBoost</div>
-          <Badge variant={xgbPrediction === 'Normal' ? 'default' : 'destructive'} className="text-xs">
-            {xgbPrediction}
+          <div className="text-xs text-muted-foreground mb-1">LSTM</div>
+          <Badge variant={lstmPrediction === 'Normal' ? 'default' : 'destructive'} className="text-xs">
+            {lstmPrediction}
           </Badge>
-          <div className="text-sm font-semibold mt-1">{xgbConfidence.toFixed(1)}%</div>
+          <div className="text-sm font-semibold mt-1">{lstmConfidence.toFixed(1)}%</div>
         </div>
       </div>
 

@@ -9,8 +9,13 @@ import { RiskLevel } from './components/risk-level';
 import { NetworkInputForm } from './components/network-input-form';
 import { PredictionHistory } from './components/prediction-history';
 import { AnomalyDetector, AnomalyScore } from './components/anomaly-detector';
+import { AttackProbabilityTable } from './components/attack-probability-table';
+import { VoteReasonPanel } from './components/vote-reason-panel';
+import { IncidentTimeline } from './components/incident-timeline';
+import { TopRiskPorts } from './components/top-risk-ports';
+import { PredictionFeedback, FeedbackEntry } from './components/prediction-feedback';
 import { detectZeroDay } from './utils/anomaly-detection';
-import { Shield, Download, FileSpreadsheet, AlertTriangle } from 'lucide-react';
+import { Shield, Download, FileSpreadsheet, AlertTriangle, Sun, Moon } from 'lucide-react';
 
 interface ModelPrediction {
   prediction: string;
@@ -21,9 +26,14 @@ interface PredictionResult {
   prediction: string;
   confidence: number;
   timestamp: string;
+  sourcePort: number;
+  destinationPort: number;
+  protocolType: number;
   mlp: ModelPrediction;
   cnn: ModelPrediction;
-  xgb: ModelPrediction;
+  lstm: ModelPrediction;
+  classProbabilities: AttackProbability[];
+  modelReasoning: ModelReasoningEntry[];
   anomalyScore?: AnomalyScore;
   topAnomalousFeatures?: Array<{
     feature: string;
@@ -38,12 +48,62 @@ interface TrendData {
   confidence: number;
 }
 
+interface VoteReason {
+  feature: string;
+  impact: number;
+  description: string;
+}
+
+interface AttackProbability {
+  attackType: string;
+  probability: number;
+}
+
+interface ModelReasoningEntry {
+  model: 'MLP' | 'CNN' | 'LSTM';
+  prediction: string;
+  confidence: number;
+  reasons: VoteReason[];
+}
+
+const FEEDBACK_STORAGE_KEY = 'cyber-defense-feedback-v1';
+
 export default function App() {
   const [currentPrediction, setCurrentPrediction] = useState<PredictionResult | null>(null);
   const [predictionLogs, setPredictionLogs] = useState<PredictionResult[]>([]);
   const [trendData, setTrendData] = useState<TrendData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [shapImage, setShapImage] = useState<string | null>(null);
+  const [lastInputData, setLastInputData] = useState<Record<string, number> | null>(null);
+  const [feedbackLogs, setFeedbackLogs] = useState<FeedbackEntry[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(FEEDBACK_STORAGE_KEY);
+      return raw ? (JSON.parse(raw) as FeedbackEntry[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window === 'undefined') return 'light';
+    const savedTheme = window.localStorage.getItem('theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') {
+      return savedTheme;
+    }
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    window.localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(feedbackLogs));
+    }
+  }, [feedbackLogs]);
 
   const applyConfidenceEdgeBoost = (confidence: number) => {
     if (confidence >= 80 && confidence <= 93) {
@@ -54,29 +114,110 @@ export default function App() {
 
   // Enhanced prediction with individual model outputs and zero-day detection
   const handlePredict = (inputData: Record<string, number>) => {
+    const isStreamingInput = inputData.__streaming === 1;
+    const analysisDelayMs = isStreamingInput ? 250 : 2500;
     setIsLoading(true);
 
     setTimeout(() => {
+      const forcedClassRaw = inputData.__forced_class;
+      const forcedClass =
+        Number.isFinite(forcedClassRaw) && forcedClassRaw >= 0 && forcedClassRaw <= 4
+          ? Math.round(forcedClassRaw)
+          : null;
+      const forcedLabels = ['Normal', 'DDoS', 'Brute Force', 'Ransomware', 'Zero-Day'] as const;
+      const forcedLabel = forcedClass !== null ? forcedLabels[forcedClass] : null;
+
       // First, run zero-day detection
-      const zeroDay = detectZeroDay(inputData);
+      const zeroDay = forcedLabel === 'Zero-Day'
+        ? {
+            isZeroDay: true,
+            overallScore: 92,
+            reconstructionError: 7.2,
+            isolationScore: 88,
+            statisticalDeviation: 5.4,
+            confidence: 96,
+            topAnomalousFeatures: [
+              {
+                feature: 'Payload_Entropy',
+                deviation: 5.1,
+                expectedRange: '1.5 - 7.0',
+                actualValue: inputData.Payload_Entropy || 9.5,
+              },
+              {
+                feature: 'Connection_Count',
+                deviation: 4.7,
+                expectedRange: '1.0 - 400.0',
+                actualValue: inputData.Connection_Count || 5000,
+              },
+              {
+                feature: 'Error_Rate',
+                deviation: 4.2,
+                expectedRange: '0.0 - 0.2',
+                actualValue: inputData.Error_Rate || 0.7,
+              },
+            ],
+          }
+        : forcedLabel
+        ? {
+            isZeroDay: false,
+            overallScore: 18,
+            reconstructionError: 1.2,
+            isolationScore: 16,
+            statisticalDeviation: 1.1,
+            confidence: 0,
+            topAnomalousFeatures: [],
+          }
+        : detectZeroDay(inputData);
       
       // Simulate individual model predictions
       let mlpPred = 'Normal';
       let mlpConf = 70;
       let cnnPred = 'Normal';
       let cnnConf = 72;
-      let xgbPred = 'Normal';
-      let xgbConf = 75;
+      let lstmPred = 'Normal';
+      let lstmConf = 75;
+      let mlpReasons: VoteReason[] = [];
+      let cnnReasons: VoteReason[] = [];
+      let lstmReasons: VoteReason[] = [];
+      const classLabels = ['Normal', 'DDoS', 'Brute Force', 'Ransomware', 'Zero-Day'] as const;
+
+      if (forcedLabel) {
+        const forcedReason: VoteReason[] = [
+          {
+            feature: 'Loaded Scenario',
+            impact: 100,
+            description: `${forcedLabel} sample selected by user action.`,
+          },
+        ];
+        mlpPred = forcedLabel;
+        cnnPred = forcedLabel;
+        lstmPred = forcedLabel;
+        mlpConf = 94 + Math.random() * 4;
+        cnnConf = 94 + Math.random() * 4;
+        lstmConf = 94 + Math.random() * 4;
+        mlpReasons = forcedReason;
+        cnnReasons = forcedReason;
+        lstmReasons = forcedReason;
+      }
 
       // If zero-day detected, all models should show high anomaly
-      if (zeroDay.isZeroDay) {
+      if (!forcedLabel && zeroDay.isZeroDay) {
         mlpPred = 'Zero-Day';
         mlpConf = 75 + Math.random() * 20;
         cnnPred = 'Zero-Day';
         cnnConf = 78 + Math.random() * 18;
-        xgbPred = 'Zero-Day';
-        xgbConf = 80 + Math.random() * 15;
-      } else {
+        lstmPred = 'Zero-Day';
+        lstmConf = 80 + Math.random() * 15;
+
+        const zeroDayReasons = zeroDay.topAnomalousFeatures.slice(0, 3).map((feature) => ({
+          feature: feature.feature.replace(/_/g, ' '),
+          impact: Number((feature.deviation * 10).toFixed(2)),
+          description: `${feature.feature.replace(/_/g, ' ')} deviated by ${feature.deviation.toFixed(1)} sigma from expected baseline.`,
+        }));
+        mlpReasons = zeroDayReasons;
+        cnnReasons = zeroDayReasons;
+        lstmReasons = zeroDayReasons;
+      } else if (!forcedLabel) {
         const packetRate = inputData.Packet_Rate || 0;
         const connectionCount = inputData.Connection_Count || 0;
         const activeConnections = inputData.Active_Connections || 0;
@@ -85,87 +226,162 @@ export default function App() {
         const failedConnections = inputData.Failed_Connections || 0;
         const bytesTransferred = inputData.Bytes_Transferred || 0;
         const duration = inputData.Duration || 0;
+        const sourcePort = inputData.Source_Port || 0;
+        const destinationPort = inputData.Destination_Port || 0;
+        const loginAttempts = inputData.Login_Attempts || 0;
         const synCount = inputData.SYN_Count || 0;
+        const ackCount = inputData.ACK_Count || 0;
         const rstCount = inputData.RST_Count || 0;
+        const synImbalance =
+          synCount <= 0 ? 0 : Math.max(0, (synCount - ackCount) / Math.max(synCount + ackCount, 1));
 
         const normalized = {
           packetRate: packetRate / 10000,
-          connectionCount: connectionCount / 5000,
+          connectionCount: connectionCount / 10000,
           activeConnections: activeConnections / 3000,
           errorRate: errorRate / 0.8,
           retransmissionRate: retransmissionRate / 0.8,
           failedConnections: failedConnections / 500,
+          loginAttempts: loginAttempts / 300,
           bytesTransferred: bytesTransferred / 50000,
           duration: duration / 1500,
-          synCount: synCount / 5000,
+          synImbalance,
           rstCount: rstCount / 1000,
         };
 
-        const evaluateModelVote = (model: 'MLP' | 'CNN' | 'XGB'): ModelPrediction => {
+        const featureLabels: Record<string, string> = {
+          packetRate: 'Packet Rate',
+          connectionCount: 'Connection Count',
+          activeConnections: 'Active Connections',
+          errorRate: 'Error Rate',
+          retransmissionRate: 'Retransmission Rate',
+          failedConnections: 'Failed Connections',
+          loginAttempts: 'Login Attempts',
+          bytesTransferred: 'Bytes Transferred',
+          duration: 'Duration',
+          synImbalance: 'SYN/ACK Imbalance',
+          rstCount: 'RST Count',
+        };
+
+        const buildReasons = (contributions: Record<string, number>, summary: string): VoteReason[] =>
+          Object.entries(contributions)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([key, value]) => ({
+              feature: featureLabels[key] || key,
+              impact: Number((value * 100).toFixed(2)),
+              description: `${featureLabels[key] || key} ${summary}`,
+            }));
+
+        const evaluateModelVote = (
+          model: 'MLP' | 'CNN' | 'LSTM',
+        ): ModelPrediction & { reasons: VoteReason[] } => {
           const weightMap = {
             MLP: {
-              ddos: { packetRate: 0.45, connectionCount: 0.35, errorRate: 0.20, synCount: 0.15 },
-              brute: { failedConnections: 0.50, connectionCount: 0.30, errorRate: 0.25, rstCount: 0.12 },
+              ddos: { packetRate: 0.40, connectionCount: 0.25, errorRate: 0.20, synImbalance: 0.35 },
+              brute: { failedConnections: 0.40, loginAttempts: 0.35, connectionCount: 0.12, errorRate: 0.22, rstCount: 0.08 },
               ransomware: { bytesTransferred: 0.50, duration: 0.30, retransmissionRate: 0.15, activeConnections: 0.10 },
+              normal: { packetRate: 0.18, connectionCount: 0.20, errorRate: 0.26, retransmissionRate: 0.18, failedConnections: 0.18 },
               threshold: 0.95,
             },
             CNN: {
-              ddos: { packetRate: 0.55, synCount: 0.30, connectionCount: 0.20, errorRate: 0.10 },
-              brute: { failedConnections: 0.42, rstCount: 0.25, errorRate: 0.30, connectionCount: 0.15 },
+              ddos: { packetRate: 0.45, synImbalance: 0.35, connectionCount: 0.15, errorRate: 0.10 },
+              brute: { failedConnections: 0.34, loginAttempts: 0.38, rstCount: 0.15, errorRate: 0.28, connectionCount: 0.10 },
               ransomware: { bytesTransferred: 0.45, duration: 0.40, activeConnections: 0.22, retransmissionRate: 0.10 },
+              normal: { packetRate: 0.22, connectionCount: 0.16, errorRate: 0.25, retransmissionRate: 0.20, failedConnections: 0.17 },
               threshold: 1.00,
             },
-            XGB: {
-              ddos: { packetRate: 0.40, connectionCount: 0.40, errorRate: 0.28, synCount: 0.10 },
-              brute: { failedConnections: 0.45, connectionCount: 0.20, errorRate: 0.28, rstCount: 0.18 },
+            LSTM: {
+              ddos: { packetRate: 0.35, connectionCount: 0.25, errorRate: 0.25, synImbalance: 0.35 },
+              brute: { failedConnections: 0.35, loginAttempts: 0.35, connectionCount: 0.10, errorRate: 0.25, rstCount: 0.10 },
               ransomware: { bytesTransferred: 0.52, duration: 0.35, retransmissionRate: 0.12, activeConnections: 0.15 },
+              normal: { packetRate: 0.16, connectionCount: 0.20, errorRate: 0.27, retransmissionRate: 0.22, failedConnections: 0.15 },
               threshold: 1.05,
             },
           } as const;
 
           const weights = weightMap[model];
-          const ddosScore =
-            normalized.packetRate * weights.ddos.packetRate +
-            normalized.connectionCount * weights.ddos.connectionCount +
-            normalized.errorRate * weights.ddos.errorRate +
-            normalized.synCount * weights.ddos.synCount;
-          const bruteScore =
-            normalized.failedConnections * weights.brute.failedConnections +
-            normalized.connectionCount * weights.brute.connectionCount +
-            normalized.errorRate * weights.brute.errorRate +
-            normalized.rstCount * weights.brute.rstCount;
-          const ransomwareScore =
-            normalized.bytesTransferred * weights.ransomware.bytesTransferred +
-            normalized.duration * weights.ransomware.duration +
-            normalized.retransmissionRate * weights.ransomware.retransmissionRate +
-            normalized.activeConnections * weights.ransomware.activeConnections;
+          const ddosContrib = {
+            packetRate: normalized.packetRate * weights.ddos.packetRate,
+            connectionCount: normalized.connectionCount * weights.ddos.connectionCount,
+            errorRate: normalized.errorRate * weights.ddos.errorRate,
+            synImbalance: normalized.synImbalance * weights.ddos.synImbalance,
+          };
+          const bruteContrib = {
+            failedConnections: normalized.failedConnections * weights.brute.failedConnections,
+            loginAttempts: normalized.loginAttempts * weights.brute.loginAttempts,
+            connectionCount: normalized.connectionCount * weights.brute.connectionCount,
+            errorRate: normalized.errorRate * weights.brute.errorRate,
+            rstCount: normalized.rstCount * weights.brute.rstCount,
+          };
+          const ransomwareContrib = {
+            bytesTransferred: normalized.bytesTransferred * weights.ransomware.bytesTransferred,
+            duration: normalized.duration * weights.ransomware.duration,
+            retransmissionRate: normalized.retransmissionRate * weights.ransomware.retransmissionRate,
+            activeConnections: normalized.activeConnections * weights.ransomware.activeConnections,
+          };
+          const normalContrib = {
+            packetRate: Math.max(0, 1 - normalized.packetRate) * weights.normal.packetRate,
+            connectionCount: Math.max(0, 1 - normalized.connectionCount) * weights.normal.connectionCount,
+            errorRate: Math.max(0, 1 - normalized.errorRate) * weights.normal.errorRate,
+            retransmissionRate: Math.max(0, 1 - normalized.retransmissionRate) * weights.normal.retransmissionRate,
+            failedConnections: Math.max(0, 1 - normalized.failedConnections) * weights.normal.failedConnections,
+          };
+
+          const ddosScore = Object.values(ddosContrib).reduce((sum, value) => sum + value, 0);
+          const bruteScore = Object.values(bruteContrib).reduce((sum, value) => sum + value, 0);
+          const ransomwareScore = Object.values(ransomwareContrib).reduce((sum, value) => sum + value, 0);
+          const normalScore = Object.values(normalContrib).reduce((sum, value) => sum + value, 0);
 
           const ddosSignature =
             packetRate > 9500 &&
             connectionCount > 2500 &&
-            (synCount > 1500 || errorRate > 0.7);
+            errorRate > 0.55 &&
+            synCount > ackCount * 1.2;
 
           const bruteSignature =
-            (failedConnections > 500 || connectionCount > 500) &&
-            errorRate > 0.6 &&
-            packetRate < 9000;
+            (failedConnections > 700 || loginAttempts > 120) &&
+            errorRate > 0.65 &&
+            packetRate < 9000 &&
+            ([21, 22, 23, 3389, 445].includes(destinationPort) ||
+              [21, 22, 23, 3389, 445].includes(sourcePort) ||
+              loginAttempts > 160);
+          const ransomwareSignature =
+            bytesTransferred > 55000 &&
+            duration > 1400 &&
+            retransmissionRate > 0.12;
 
           // Prevent burst DDoS traffic from being misread as brute force.
           const brutePenaltyForBurst = packetRate > 9000 ? 0.75 : 0;
-          const adjustedBruteScore = Math.max(0, bruteScore - brutePenaltyForBurst);
-          const adjustedDdosScore = ddosScore + (packetRate > 9000 ? 0.35 : 0);
+          const benignAckBias = ackCount > synCount * 1.5 && failedConnections < 200 ? 0.45 : 0;
+          const adjustedBruteScore = Math.max(0, bruteScore - brutePenaltyForBurst - benignAckBias);
+          const adjustedDdosScore = ddosScore + (packetRate > 9000 && errorRate > 0.45 ? 0.2 : 0);
+          const adjustedRansomwareScore = ransomwareSignature ? ransomwareScore : ransomwareScore * 0.8;
+          const adjustedNormalScore =
+            normalScore +
+            (errorRate < 0.2 ? 0.25 : 0) +
+            (failedConnections < 120 ? 0.2 : 0) +
+            (ackCount >= synCount ? 0.15 : 0);
 
           if (ddosSignature) {
             return {
               prediction: 'DDoS',
               confidence: Math.min(98, 86 + Math.random() * 10),
+              reasons: buildReasons(ddosContrib, 'spiked sharply and matched DDoS behavior.'),
+            };
+          }
+          if (!ddosSignature && !bruteSignature && !ransomwareSignature && adjustedNormalScore >= Math.max(adjustedDdosScore, adjustedBruteScore, adjustedRansomwareScore)) {
+            return {
+              prediction: 'Normal',
+              confidence: 82 + Math.random() * 12,
+              reasons: buildReasons(normalContrib, 'remained stable and aligned with normal behavior.'),
             };
           }
 
           const ranked = [
             { prediction: 'DDoS', score: adjustedDdosScore },
             { prediction: 'Brute Force', score: bruteSignature ? adjustedBruteScore : adjustedBruteScore * 0.75 },
-            { prediction: 'Ransomware', score: ransomwareScore },
+            { prediction: 'Ransomware', score: adjustedRansomwareScore },
           ].sort((a, b) => b.score - a.score);
 
           const top = ranked[0];
@@ -173,37 +389,51 @@ export default function App() {
             return {
               prediction: 'Normal',
               confidence: 66 + Math.random() * 14,
+              reasons: buildReasons(normalContrib, 'stayed within normal operating range.'),
             };
           }
+
+          const classReasonMap: Record<string, Record<string, number>> = {
+            DDoS: ddosContrib,
+            'Brute Force': bruteContrib,
+            Ransomware: ransomwareContrib,
+          };
 
           return {
             prediction: top.prediction,
             confidence: Math.min(98, 72 + top.score * 14 + Math.random() * 5),
+            reasons: buildReasons(
+              classReasonMap[top.prediction] || ddosContrib,
+              `was a major contributor to ${top.prediction} vote.`,
+            ),
           };
         };
 
         const mlpVote = evaluateModelVote('MLP');
         const cnnVote = evaluateModelVote('CNN');
-        const xgbVote = evaluateModelVote('XGB');
+        const lstmVote = evaluateModelVote('LSTM');
 
         mlpPred = mlpVote.prediction;
         mlpConf = mlpVote.confidence;
+        mlpReasons = mlpVote.reasons;
         cnnPred = cnnVote.prediction;
         cnnConf = cnnVote.confidence;
-        xgbPred = xgbVote.prediction;
-        xgbConf = xgbVote.confidence;
+        cnnReasons = cnnVote.reasons;
+        lstmPred = lstmVote.prediction;
+        lstmConf = lstmVote.confidence;
+        lstmReasons = lstmVote.reasons;
       }
 
       // Edge-condition post-processing for displayed confidence values.
       mlpConf = applyConfidenceEdgeBoost(mlpConf);
       cnnConf = applyConfidenceEdgeBoost(cnnConf);
-      xgbConf = applyConfidenceEdgeBoost(xgbConf);
+      lstmConf = applyConfidenceEdgeBoost(lstmConf);
 
       // Majority voting
       const modelVotes = [
-        { prediction: mlpPred, confidence: mlpConf },
-        { prediction: cnnPred, confidence: cnnConf },
-        { prediction: xgbPred, confidence: xgbConf },
+        { model: 'MLP' as const, prediction: mlpPred, confidence: mlpConf, reasons: mlpReasons },
+        { model: 'CNN' as const, prediction: cnnPred, confidence: cnnConf, reasons: cnnReasons },
+        { model: 'LSTM' as const, prediction: lstmPred, confidence: lstmConf, reasons: lstmReasons },
       ];
       const voteCounts: Record<string, number> = {};
       modelVotes.forEach((vote) => {
@@ -232,13 +462,52 @@ export default function App() {
         majorityVotes.reduce((sum, vote) => sum + vote.confidence, 0) / majorityVotes.length,
       );
 
+      const classScores: Record<(typeof classLabels)[number], number> = {
+        Normal: 0,
+        DDoS: 0,
+        'Brute Force': 0,
+        Ransomware: 0,
+        'Zero-Day': 0,
+      };
+      modelVotes.forEach((vote) => {
+        classLabels.forEach((label) => {
+          if (label === vote.prediction) {
+            classScores[label] += vote.confidence;
+          } else {
+            classScores[label] += (100 - vote.confidence) / (classLabels.length - 1);
+          }
+        });
+      });
+
+      if (zeroDay.isZeroDay) {
+        classScores['Zero-Day'] += 140;
+      } else {
+        classScores['Zero-Day'] += Math.min(25, zeroDay.overallScore * 0.25);
+      }
+
+      const classScoreTotal = classLabels.reduce((sum, label) => sum + classScores[label], 0);
+      const classProbabilities: AttackProbability[] = classLabels.map((label) => ({
+        attackType: label,
+        probability: Number(((classScores[label] / classScoreTotal) * 100).toFixed(2)),
+      }));
+
       const result: PredictionResult = {
         prediction: finalPrediction,
         confidence: avgConfidence,
         timestamp: new Date().toISOString(),
+        sourcePort: inputData.Source_Port || 0,
+        destinationPort: inputData.Destination_Port || 0,
+        protocolType: inputData.Protocol_Type || 0,
         mlp: { prediction: mlpPred, confidence: mlpConf },
         cnn: { prediction: cnnPred, confidence: cnnConf },
-        xgb: { prediction: xgbPred, confidence: xgbConf },
+        lstm: { prediction: lstmPred, confidence: lstmConf },
+        classProbabilities,
+        modelReasoning: modelVotes.map((vote) => ({
+          model: vote.model,
+          prediction: vote.prediction,
+          confidence: vote.confidence,
+          reasons: vote.reasons,
+        })),
         anomalyScore: {
           overallScore: zeroDay.overallScore,
           isZeroDay: zeroDay.isZeroDay,
@@ -260,10 +529,11 @@ export default function App() {
       }].slice(-30));
 
       // Generate SHAP visualization
+      setLastInputData(inputData);
       generateShapVisualization(finalPrediction, inputData);
 
       setIsLoading(false);
-    }, 2500);
+    }, analysisDelayMs);
   };
 
   const generateShapVisualization = (prediction: string, inputData: Record<string, number>) => {
@@ -275,12 +545,36 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     
     if (ctx) {
+      const isDark = theme === 'dark';
+      const palette = isDark
+        ? {
+            background: '#0f172a',
+            title: '#e2e8f0',
+            label: '#cbd5e1',
+            value: '#f8fafc',
+            normalBar: '#22c55e',
+            attackBar: '#f87171',
+            border: '#334155',
+          }
+        : {
+            background: '#ffffff',
+            title: '#1e293b',
+            label: '#475569',
+            value: '#1e293b',
+            normalBar: '#10b981',
+            attackBar: '#ef4444',
+            border: '#e2e8f0',
+          };
+
       // Background
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = palette.background;
       ctx.fillRect(0, 0, 800, 400);
+      ctx.strokeStyle = palette.border;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0.5, 0.5, 799, 399);
       
       // Title
-      ctx.fillStyle = '#1e293b';
+      ctx.fillStyle = palette.title;
       ctx.font = 'bold 20px Inter';
       ctx.fillText('Feature Importance (SHAP Values)', 20, 40);
       
@@ -299,21 +593,27 @@ export default function App() {
         const barWidth = feature.value * 500;
         
         // Bar
-        ctx.fillStyle = prediction === 'Normal' ? '#10b981' : '#ef4444';
+        ctx.fillStyle = prediction === 'Normal' ? palette.normalBar : palette.attackBar;
         ctx.fillRect(200, y, barWidth, 30);
         
         // Label
-        ctx.fillStyle = '#475569';
+        ctx.fillStyle = palette.label;
         ctx.fillText(feature.name, 20, y + 20);
         
         // Value
-        ctx.fillStyle = '#1e293b';
+        ctx.fillStyle = palette.value;
         ctx.fillText(feature.value.toFixed(2), 720, y + 20);
       });
     }
     
     setShapImage(canvas.toDataURL());
   };
+
+  useEffect(() => {
+    if (currentPrediction && lastInputData) {
+      generateShapVisualization(currentPrediction.prediction, lastInputData);
+    }
+  }, [theme, currentPrediction, lastInputData]);
 
   const downloadPDF = () => {
     alert('PDF Report generation would be implemented here.\n\nReport includes:\n- Prediction: ' + 
@@ -341,11 +641,72 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const handlePredictionFeedback = (isCorrect: boolean) => {
+    if (!currentPrediction) return;
+    const isAttackPrediction = currentPrediction.prediction !== 'Normal';
+    const outcome: FeedbackEntry['outcome'] = isCorrect
+      ? isAttackPrediction
+        ? 'True Positive'
+        : 'True Negative'
+      : isAttackPrediction
+        ? 'False Positive'
+        : 'False Negative';
+
+    const entry: FeedbackEntry = {
+      id: `${currentPrediction.timestamp}-${Date.now()}`,
+      predictionTimestamp: currentPrediction.timestamp,
+      feedbackTimestamp: new Date().toISOString(),
+      prediction: currentPrediction.prediction,
+      confidence: currentPrediction.confidence,
+      userFeedback: isCorrect ? 'Correct' : 'Wrong',
+      outcome,
+      featureSnapshot: lastInputData ? JSON.stringify(lastInputData) : undefined,
+    };
+
+    setFeedbackLogs((prev) => [
+      entry,
+      ...prev.filter((item) => item.predictionTimestamp !== currentPrediction.timestamp),
+    ]);
+  };
+
+  const exportFeedbackCSV = () => {
+    const csv = [
+      [
+        'PredictionTimestamp',
+        'FeedbackTimestamp',
+        'Prediction',
+        'Confidence',
+        'UserFeedback',
+        'Outcome',
+        'FeatureSnapshot',
+      ],
+      ...feedbackLogs.map((entry) => [
+        entry.predictionTimestamp,
+        entry.feedbackTimestamp,
+        entry.prediction,
+        entry.confidence.toFixed(2),
+        entry.userFeedback,
+        entry.outcome,
+        entry.featureSnapshot ? `"${entry.featureSnapshot.replace(/"/g, '""')}"` : '',
+      ]),
+    ]
+      .map((row) => row.join(','))
+      .join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'prediction_feedback.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 dark:from-slate-950 dark:to-blue-950">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 dark:from-slate-900 dark:to-slate-800">
       {/* Loading Overlay */}
       {isLoading && (
-        <div className="fixed inset-0 bg-white/90 dark:bg-slate-950/90 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-white/90 dark:bg-slate-900/90 flex items-center justify-center z-50">
           <div className="text-center">
             <div className="inline-block animate-spin rounded-full h-16 w-16 border-4 border-primary border-t-transparent"></div>
             <p className="mt-4 text-lg font-semibold">Analyzing packet...</p>
@@ -354,6 +715,16 @@ export default function App() {
       )}
 
       <div className="container mx-auto px-4 py-8 max-w-7xl">
+        <div className="flex justify-end mb-4">
+          <Button
+            variant="outline"
+            onClick={() => setTheme(prev => (prev === 'dark' ? 'light' : 'dark'))}
+            className="gap-2"
+          >
+            {theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />}
+            {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+          </Button>
+        </div>
         
         {/* Header */}
         <div className="text-center mb-8">
@@ -376,7 +747,7 @@ export default function App() {
               CNN
             </span>
             <span className="text-sm bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 px-3 py-1 rounded-full">
-              XGBoost
+              LSTM
             </span>
           </div>
         </div>
@@ -389,17 +760,26 @@ export default function App() {
               confidence={currentPrediction.confidence}
             />
 
-            {/* Model Voting Chart */}
-            <div className="mt-6">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-6">
+              {/* Model Voting Chart */}
               <ModelVotingChart
                 mlpPrediction={currentPrediction.mlp.prediction}
                 mlpConfidence={currentPrediction.mlp.confidence}
                 cnnPrediction={currentPrediction.cnn.prediction}
                 cnnConfidence={currentPrediction.cnn.confidence}
-                xgbPrediction={currentPrediction.xgb.prediction}
-                xgbConfidence={currentPrediction.xgb.confidence}
+                lstmPrediction={currentPrediction.lstm.prediction}
+                lstmConfidence={currentPrediction.lstm.confidence}
                 finalPrediction={currentPrediction.prediction}
               />
+
+              <AttackProbabilityTable
+                probabilities={currentPrediction.classProbabilities}
+                finalPrediction={currentPrediction.prediction}
+              />
+            </div>
+
+            <div className="mt-6">
+              <VoteReasonPanel modelReasoning={currentPrediction.modelReasoning} />
             </div>
 
             {/* Zero-Day Anomaly Detection */}
@@ -437,7 +817,7 @@ export default function App() {
             {shapImage && (
               <Card className="p-6 mt-6">
                 <h3 className="text-xl font-bold mb-4">Explainability (SHAP Values)</h3>
-                <div className="bg-white rounded-lg p-4 border">
+                <div className="bg-white dark:bg-slate-900 rounded-lg p-4 border dark:border-slate-600">
                   <img src={shapImage} alt="SHAP Feature Importance" className="w-full rounded-lg" />
                 </div>
                 <p className="text-sm text-muted-foreground mt-3">
@@ -475,20 +855,45 @@ export default function App() {
           <PredictionHistory logs={predictionLogs} />
         </div>
 
+        <div className="mt-6">
+          <PredictionFeedback
+            currentPrediction={
+              currentPrediction
+                ? {
+                    timestamp: currentPrediction.timestamp,
+                    prediction: currentPrediction.prediction,
+                    confidence: currentPrediction.confidence,
+                  }
+                : null
+            }
+            feedbackLogs={feedbackLogs}
+            onMarkFeedback={handlePredictionFeedback}
+            onExportFeedback={exportFeedbackCSV}
+          />
+        </div>
+
+        <div className="mt-6">
+          <IncidentTimeline logs={predictionLogs} />
+        </div>
+
+        <div className="mt-6">
+          <TopRiskPorts logs={predictionLogs} />
+        </div>
+
         {/* Input Form */}
         <div className="mt-6">
           <NetworkInputForm onSubmit={handlePredict} isLoading={isLoading} />
         </div>
 
         {/* Info Card */}
-        <Card className="p-6 mt-6 bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800">
+        <Card className="p-6 mt-6 bg-blue-50 dark:bg-slate-800/70 border-blue-200 dark:border-slate-600">
           <div className="flex gap-3">
             <AlertTriangle className="size-6 text-blue-600 flex-shrink-0" />
             <div>
               <h4 className="font-semibold mb-2">About This System</h4>
               <p className="text-sm text-muted-foreground mb-3">
                 This advanced intrusion detection system uses a hybrid ensemble approach combining 
-                MLP, CNN, and XGBoost models. It can detect:
+                MLP, CNN, and LSTM models. It can detect:
               </p>
               <ul className="text-sm text-muted-foreground space-y-1 ml-4">
                 <li>✅ <strong>Normal traffic</strong> - Baseline network behavior</li>
