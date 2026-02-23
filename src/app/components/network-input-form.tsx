@@ -344,6 +344,24 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
     ransomware: 0,
     zeroday: 0,
   });
+  const autoStreamStartedRef = React.useRef(false);
+  const forcedClassHintRef = React.useRef<number | null>(null);
+  const onSubmitRef = React.useRef(onSubmit);
+  const isLoadingRef = React.useRef(isLoading);
+  const streamRunnerRef = React.useRef<() => void>(() => {});
+  const streamKickoffDoneRef = React.useRef(false);
+
+  React.useEffect(() => {
+    forcedClassHintRef.current = forcedClassHint;
+  }, [forcedClassHint]);
+
+  React.useEffect(() => {
+    onSubmitRef.current = onSubmit;
+  }, [onSubmit]);
+
+  React.useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -386,14 +404,17 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
   const submitForPrediction = React.useCallback(
     (rowData: Record<string, string>, forcedClass?: number | null, isStreamingRow = false) => {
       const payload = buildNumericData(rowData);
-      const classHint = forcedClass ?? forcedClassHint;
+      const classHint =
+        forcedClass !== null && forcedClass !== undefined
+          ? forcedClass
+          : forcedClassHintRef.current;
       if (classHint !== null && classHint !== undefined) {
         payload.__forced_class = classHint;
       }
       payload.__streaming = isStreamingRow ? 1 : 0;
-      onSubmit(payload);
+      onSubmitRef.current(payload);
     },
-    [buildNumericData, forcedClassHint, onSubmit],
+    [buildNumericData],
   );
 
   const randomInt = React.useCallback((min: number, max: number) => {
@@ -456,6 +477,8 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
   }, [randomFloat, randomInt]);
 
   const streamNextRowAndPredict = React.useCallback(() => {
+    if (isLoadingRef.current) return;
+
     if (streamMode === 'random5000') {
       const row = buildRandomNear5000Row();
       const randomForcedClass = Math.floor(Math.random() * 5);
@@ -477,19 +500,40 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
   }, [allDatasetRows, streamMode, buildRandomNear5000Row, submitForPrediction]);
 
   React.useEffect(() => {
+    streamRunnerRef.current = streamNextRowAndPredict;
+  }, [streamNextRowAndPredict]);
+
+  React.useEffect(() => {
     const canStreamDataset = datasetLoaded && allDatasetRows.length > 0;
     const canStreamRandom = streamMode === 'random5000';
-    if (!isLiveStreaming || (!canStreamDataset && !canStreamRandom)) return;
+    if (!isLiveStreaming || (!canStreamDataset && !canStreamRandom)) {
+      streamKickoffDoneRef.current = false;
+      return;
+    }
+
+    // Predict once when stream starts/resumes.
+    if (!streamKickoffDoneRef.current) {
+      streamKickoffDoneRef.current = true;
+      streamRunnerRef.current();
+    }
 
     const intervalMs = Math.max(1, streamIntervalSeconds) * 1000;
     const timerId = window.setInterval(() => {
-      streamNextRowAndPredict();
+      streamRunnerRef.current();
     }, intervalMs);
 
     return () => {
       window.clearInterval(timerId);
     };
-  }, [isLiveStreaming, datasetLoaded, allDatasetRows.length, streamIntervalSeconds, streamNextRowAndPredict, streamMode]);
+  }, [isLiveStreaming, datasetLoaded, allDatasetRows.length, streamIntervalSeconds, streamMode]);
+
+  React.useEffect(() => {
+    const canAutoStart = streamMode === 'random5000' || (datasetLoaded && allDatasetRows.length > 0);
+    if (!canAutoStart || autoStreamStartedRef.current) return;
+    autoStreamStartedRef.current = true;
+    setHasStreamStarted(true);
+    setIsLiveStreaming(true);
+  }, [datasetLoaded, allDatasetRows.length, streamMode]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

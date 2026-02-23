@@ -6,7 +6,8 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "train:pytorch": "python src/app/data/intrusion_detection_pytorch.py --dataset-path dist/datasets/cyberfeddefender_dataset.csv --epochs 8 --metrics-out public/pytorch-training-metrics.json --auto-generated-rows 5000 --auto-dataset-csv public/datasets/auto_generated_dataset.csv"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

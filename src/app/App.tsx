@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { Card } from './components/ui/card';
 import { Button } from './components/ui/button';
+import { Input } from './components/ui/input';
 import { AttackStatusBanner } from './components/attack-status-banner';
 import { ModelVotingChart } from './components/model-voting-chart';
 import { ConfidenceGauge } from './components/confidence-gauge';
@@ -13,9 +14,14 @@ import { AttackProbabilityTable } from './components/attack-probability-table';
 import { VoteReasonPanel } from './components/vote-reason-panel';
 import { IncidentTimeline } from './components/incident-timeline';
 import { TopRiskPorts } from './components/top-risk-ports';
-import { PredictionFeedback, FeedbackEntry } from './components/prediction-feedback';
+import { DriftQualityMonitorPanel } from './components/drift-quality-monitor-panel';
 import { detectZeroDay } from './utils/anomaly-detection';
-import { Shield, Download, FileSpreadsheet, AlertTriangle, Sun, Moon } from 'lucide-react';
+import {
+  createInitialDriftQualityState,
+  updateDriftQualityState,
+  DriftQualityState,
+} from './utils/drift-quality-monitor';
+import { Shield, Download, FileSpreadsheet, Sun, Moon } from 'lucide-react';
 
 interface ModelPrediction {
   prediction: string;
@@ -41,6 +47,7 @@ interface PredictionResult {
     expectedRange: string;
     actualValue: number;
   }>;
+  systemMode?: SystemModeStatus;
 }
 
 interface TrendData {
@@ -66,24 +73,66 @@ interface ModelReasoningEntry {
   reasons: VoteReason[];
 }
 
-const FEEDBACK_STORAGE_KEY = 'cyber-defense-feedback-v1';
+const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_TIMEOUT_MS = 15000;
+const SERVICES = ['collector', 'api', 'model-mlp', 'model-cnn', 'model-lstm'] as const;
+const MODEL_SERVICES = ['model-mlp', 'model-cnn', 'model-lstm'] as const;
+type ServiceName = (typeof SERVICES)[number];
+type ModelServiceName = Extract<ServiceName, 'model-mlp' | 'model-cnn' | 'model-lstm'>;
+
+interface ServiceHeartbeat {
+  service: ServiceName;
+  lastHeartbeat: number;
+  latencyMs: number;
+  healthy: boolean;
+  muted: boolean;
+}
+
+interface ServiceTransitionAlert {
+  id: string;
+  timestamp: string;
+  service: ServiceName;
+  from: 'Healthy' | 'Unhealthy';
+  to: 'Healthy' | 'Unhealthy';
+  source: 'auto' | 'manual';
+  reason: string;
+}
+
+interface SystemModeStatus {
+  degradedMode: boolean;
+  lowTrust: boolean;
+  manualReviewRequired: boolean;
+  healthyModels: number;
+  unavailableModels: Array<'MLP' | 'CNN' | 'LSTM'>;
+  reason: string;
+}
 
 export default function App() {
+  const now = Date.now();
   const [currentPrediction, setCurrentPrediction] = useState<PredictionResult | null>(null);
   const [predictionLogs, setPredictionLogs] = useState<PredictionResult[]>([]);
   const [trendData, setTrendData] = useState<TrendData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [shapImage, setShapImage] = useState<string | null>(null);
   const [lastInputData, setLastInputData] = useState<Record<string, number> | null>(null);
-  const [feedbackLogs, setFeedbackLogs] = useState<FeedbackEntry[]>(() => {
-    if (typeof window === 'undefined') return [];
-    try {
-      const raw = window.localStorage.getItem(FEEDBACK_STORAGE_KEY);
-      return raw ? (JSON.parse(raw) as FeedbackEntry[]) : [];
-    } catch {
-      return [];
-    }
+  const [driftQualityState, setDriftQualityState] = useState<DriftQualityState>(() =>
+    createInitialDriftQualityState(),
+  );
+  const [serviceHeartbeats, setServiceHeartbeats] = useState<Record<ServiceName, ServiceHeartbeat>>({
+    collector: { service: 'collector', lastHeartbeat: now, latencyMs: 24, healthy: true, muted: false },
+    api: { service: 'api', lastHeartbeat: now, latencyMs: 31, healthy: true, muted: false },
+    'model-mlp': { service: 'model-mlp', lastHeartbeat: now, latencyMs: 29, healthy: true, muted: false },
+    'model-cnn': { service: 'model-cnn', lastHeartbeat: now, latencyMs: 27, healthy: true, muted: false },
+    'model-lstm': { service: 'model-lstm', lastHeartbeat: now, latencyMs: 34, healthy: true, muted: false },
   });
+  const [serviceAlerts, setServiceAlerts] = useState<ServiceTransitionAlert[]>([]);
+  const [triggerService, setTriggerService] = useState<ServiceName>('model-mlp');
+  const [triggerReason, setTriggerReason] = useState('Manual resilience drill');
+  const [autoTriggerEnabled, setAutoTriggerEnabled] = useState(false);
+  const [autoTriggerIntervalSeconds, setAutoTriggerIntervalSeconds] = useState(20);
+  const previousHealthRef = React.useRef<Record<ServiceName, boolean> | null>(null);
+  const manualTransitionRef = React.useRef<Set<ServiceName>>(new Set());
+  const serviceHeartbeatsRef = React.useRef<Record<ServiceName, ServiceHeartbeat> | null>(null);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window === 'undefined') return 'light';
     const savedTheme = window.localStorage.getItem('theme');
@@ -100,10 +149,182 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(feedbackLogs));
+    serviceHeartbeatsRef.current = serviceHeartbeats;
+  }, [serviceHeartbeats]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const timestamp = Date.now();
+      setServiceHeartbeats((prev) => {
+        const next = { ...prev };
+        SERVICES.forEach((service) => {
+          const current = next[service];
+          if (current.muted) return;
+          next[service] = {
+            ...current,
+            lastHeartbeat: timestamp,
+            latencyMs: 15 + Math.floor(Math.random() * 50),
+          };
+        });
+        return next;
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const timestamp = Date.now();
+      setServiceHeartbeats((prev) => {
+        const next = { ...prev };
+        SERVICES.forEach((service) => {
+          const current = next[service];
+          const isHealthy = timestamp - current.lastHeartbeat <= HEARTBEAT_TIMEOUT_MS;
+          next[service] = {
+            ...current,
+            healthy: isHealthy && !current.muted,
+          };
+        });
+        return next;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, []);
+
+  const pushServiceAlert = React.useCallback((alert: Omit<ServiceTransitionAlert, 'id' | 'timestamp'>) => {
+    const entry: ServiceTransitionAlert = {
+      ...alert,
+      id: `${alert.service}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      timestamp: new Date().toISOString(),
+    };
+    setServiceAlerts((prev) => [entry, ...prev].slice(0, 100));
+  }, []);
+
+  useEffect(() => {
+    if (!previousHealthRef.current) {
+      previousHealthRef.current = SERVICES.reduce(
+        (acc, service) => {
+          acc[service] = serviceHeartbeats[service].healthy;
+          return acc;
+        },
+        {} as Record<ServiceName, boolean>,
+      );
+      return;
     }
-  }, [feedbackLogs]);
+
+    const previous = previousHealthRef.current;
+    const nextSnapshot: Record<ServiceName, boolean> = { ...previous };
+
+    SERVICES.forEach((service) => {
+      const before = previous[service];
+      const after = serviceHeartbeats[service].healthy;
+      if (before === after) return;
+
+      if (manualTransitionRef.current.has(service)) {
+        manualTransitionRef.current.delete(service);
+      } else {
+        pushServiceAlert({
+          service,
+          from: before ? 'Healthy' : 'Unhealthy',
+          to: after ? 'Healthy' : 'Unhealthy',
+          source: 'auto',
+          reason: after
+            ? 'Heartbeat recovered automatically.'
+            : `No heartbeat for more than ${HEARTBEAT_TIMEOUT_MS / 1000}s.`,
+        });
+      }
+
+      nextSnapshot[service] = after;
+    });
+
+    previousHealthRef.current = nextSnapshot;
+  }, [serviceHeartbeats]);
+
+  const forceServiceState = React.useCallback((
+    service: ServiceName,
+    shouldBeHealthy: boolean,
+    reason: string,
+    source: 'manual' | 'auto' = 'manual',
+  ) => {
+    const timestamp = Date.now();
+    let fromHealthy: boolean | null = null;
+    setServiceHeartbeats((prev) => {
+      const current = prev[service];
+      if (current.healthy === shouldBeHealthy && current.muted === !shouldBeHealthy) {
+        return prev;
+      }
+
+      fromHealthy = current.healthy;
+      manualTransitionRef.current.add(service);
+      return {
+        ...prev,
+        [service]: {
+          ...current,
+          muted: !shouldBeHealthy,
+          healthy: shouldBeHealthy,
+          lastHeartbeat: shouldBeHealthy ? timestamp : current.lastHeartbeat,
+          latencyMs: shouldBeHealthy ? 12 + Math.floor(Math.random() * 40) : current.latencyMs,
+        },
+      };
+    });
+
+    if (fromHealthy !== null) {
+      pushServiceAlert({
+        service,
+        from: fromHealthy ? 'Healthy' : 'Unhealthy',
+        to: shouldBeHealthy ? 'Healthy' : 'Unhealthy',
+        source,
+        reason: reason.trim() || 'Manual trigger action.',
+      });
+    }
+  }, [pushServiceAlert]);
+
+  const toggleServiceHeartbeat = (service: ServiceName) => {
+    const current = serviceHeartbeats[service];
+    if (current.muted || !current.healthy) {
+      forceServiceState(service, true, 'Manual resume from quick toggle.');
+    } else {
+      forceServiceState(service, false, 'Manual pause from quick toggle.');
+    }
+  };
+
+  const triggerServiceDown = () => {
+    forceServiceState(triggerService, false, triggerReason || 'Manual outage trigger.');
+  };
+
+  const triggerServiceRecover = () => {
+    forceServiceState(triggerService, true, triggerReason || 'Manual recovery trigger.');
+  };
+
+  useEffect(() => {
+    if (!autoTriggerEnabled) return;
+    const intervalMs = Math.max(5, autoTriggerIntervalSeconds) * 1000;
+    const timerId = window.setInterval(() => {
+      const target = MODEL_SERVICES[Math.floor(Math.random() * MODEL_SERVICES.length)];
+      const current = serviceHeartbeatsRef.current?.[target];
+      if (!current) return;
+      const shouldRecover = current.muted || !current.healthy;
+      if (shouldRecover) {
+        forceServiceState(target, true, 'Automatic trigger: recovery simulation.', 'auto');
+      } else {
+        forceServiceState(target, false, 'Automatic trigger: outage simulation.', 'auto');
+      }
+    }, intervalMs);
+
+    return () => window.clearInterval(timerId);
+  }, [autoTriggerEnabled, autoTriggerIntervalSeconds, forceServiceState]);
+
+  const handleAutoTriggerIntervalChange = (value: string) => {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 5) {
+      setAutoTriggerIntervalSeconds(parsed);
+    }
+  };
+
+  const getLastHeartbeatAge = (lastHeartbeat: number) =>
+    Math.max(0, Math.floor((Date.now() - lastHeartbeat) / 1000));
 
   const applyConfidenceEdgeBoost = (confidence: number) => {
     if (confidence >= 80 && confidence <= 93) {
@@ -116,6 +337,7 @@ export default function App() {
   const handlePredict = (inputData: Record<string, number>) => {
     const isStreamingInput = inputData.__streaming === 1;
     const analysisDelayMs = isStreamingInput ? 250 : 2500;
+    const serviceHealthSnapshot = serviceHeartbeats;
     setIsLoading(true);
 
     setTimeout(() => {
@@ -429,38 +651,96 @@ export default function App() {
       cnnConf = applyConfidenceEdgeBoost(cnnConf);
       lstmConf = applyConfidenceEdgeBoost(lstmConf);
 
-      // Majority voting
-      const modelVotes = [
+      const modelVotesRaw = [
         { model: 'MLP' as const, prediction: mlpPred, confidence: mlpConf, reasons: mlpReasons },
         { model: 'CNN' as const, prediction: cnnPred, confidence: cnnConf, reasons: cnnReasons },
         { model: 'LSTM' as const, prediction: lstmPred, confidence: lstmConf, reasons: lstmReasons },
       ];
+      const modelToService: Record<'MLP' | 'CNN' | 'LSTM', ModelServiceName> = {
+        MLP: 'model-mlp',
+        CNN: 'model-cnn',
+        LSTM: 'model-lstm',
+      };
+      const isModelHealthy = (model: 'MLP' | 'CNN' | 'LSTM') =>
+        Boolean(serviceHealthSnapshot[modelToService[model]]?.healthy);
+
+      const modelVotes = modelVotesRaw.map((vote) =>
+        isModelHealthy(vote.model)
+          ? vote
+          : {
+              ...vote,
+              prediction: 'Offline',
+              confidence: 0,
+              reasons: [
+                {
+                  feature: 'Heartbeat Timeout',
+                  impact: 100,
+                  description: `${vote.model} heartbeat missing for more than ${HEARTBEAT_TIMEOUT_MS / 1000}s. Vote excluded.`,
+                },
+              ],
+            },
+      );
+
+      const activeModelVotes = modelVotes.filter((vote) => vote.prediction !== 'Offline');
+      const unavailableModels = modelVotes
+        .filter((vote) => vote.prediction === 'Offline')
+        .map((vote) => vote.model);
+
       const voteCounts: Record<string, number> = {};
-      modelVotes.forEach((vote) => {
+      activeModelVotes.forEach((vote) => {
         voteCounts[vote.prediction] = (voteCounts[vote.prediction] || 0) + 1;
       });
 
-      const maxVotes = Math.max(...Object.values(voteCounts));
-      const topPredictions = Object.keys(voteCounts).filter(
-        (prediction) => voteCounts[prediction] === maxVotes,
-      );
+      let lowTrust = false;
+      let degradedMode = activeModelVotes.length < 3;
+      let modeReason = '';
+      let finalPrediction = 'Normal';
 
-      const finalPrediction =
-        topPredictions.length === 1
-          ? topPredictions[0]
-          : topPredictions
-              .map((prediction) => {
-                const matchingVotes = modelVotes.filter((vote) => vote.prediction === prediction);
-                const avgVoteConfidence =
-                  matchingVotes.reduce((sum, vote) => sum + vote.confidence, 0) / matchingVotes.length;
-                return { prediction, avgVoteConfidence };
-              })
-              .sort((a, b) => b.avgVoteConfidence - a.avgVoteConfidence)[0].prediction;
+      if (activeModelVotes.length === 0) {
+        lowTrust = true;
+        modeReason = 'No healthy model heartbeats. Prediction fallback set to Normal.';
+      } else {
+        const maxVotes = Math.max(...Object.values(voteCounts));
+        const topPredictions = Object.keys(voteCounts).filter(
+          (prediction) => voteCounts[prediction] === maxVotes,
+        );
 
-      const majorityVotes = modelVotes.filter((vote) => vote.prediction === finalPrediction);
-      const avgConfidence = applyConfidenceEdgeBoost(
-        majorityVotes.reduce((sum, vote) => sum + vote.confidence, 0) / majorityVotes.length,
-      );
+        finalPrediction =
+          topPredictions.length === 1
+            ? topPredictions[0]
+            : topPredictions
+                .map((prediction) => {
+                  const matchingVotes = activeModelVotes.filter((vote) => vote.prediction === prediction);
+                  const avgVoteConfidence =
+                    matchingVotes.reduce((sum, vote) => sum + vote.confidence, 0) / matchingVotes.length;
+                  return { prediction, avgVoteConfidence };
+                })
+                .sort((a, b) => b.avgVoteConfidence - a.avgVoteConfidence)[0].prediction;
+
+        if (activeModelVotes.length === 1) {
+          lowTrust = true;
+          modeReason = 'Only one model is healthy. Manual review required.';
+        } else if (topPredictions.length > 1) {
+          lowTrust = true;
+          modeReason = 'No strict majority among healthy models. Manual review required.';
+        } else if (degradedMode) {
+          modeReason = 'One model unavailable. Using healthy-model majority vote.';
+        }
+      }
+
+      const majorityVotes =
+        activeModelVotes.length === 0
+          ? []
+          : activeModelVotes.filter((vote) => vote.prediction === finalPrediction);
+      let avgConfidence =
+        majorityVotes.length === 0
+          ? 48
+          : applyConfidenceEdgeBoost(
+              majorityVotes.reduce((sum, vote) => sum + vote.confidence, 0) / majorityVotes.length,
+            );
+      if (lowTrust) {
+        avgConfidence = Math.min(avgConfidence, 69);
+      }
 
       const classScores: Record<(typeof classLabels)[number], number> = {
         Normal: 0,
@@ -469,7 +749,8 @@ export default function App() {
         Ransomware: 0,
         'Zero-Day': 0,
       };
-      modelVotes.forEach((vote) => {
+      const scoringVotes = activeModelVotes.length > 0 ? activeModelVotes : modelVotesRaw;
+      scoringVotes.forEach((vote) => {
         classLabels.forEach((label) => {
           if (label === vote.prediction) {
             classScores[label] += vote.confidence;
@@ -498,9 +779,9 @@ export default function App() {
         sourcePort: inputData.Source_Port || 0,
         destinationPort: inputData.Destination_Port || 0,
         protocolType: inputData.Protocol_Type || 0,
-        mlp: { prediction: mlpPred, confidence: mlpConf },
-        cnn: { prediction: cnnPred, confidence: cnnConf },
-        lstm: { prediction: lstmPred, confidence: lstmConf },
+        mlp: { prediction: modelVotes[0].prediction, confidence: modelVotes[0].confidence },
+        cnn: { prediction: modelVotes[1].prediction, confidence: modelVotes[1].confidence },
+        lstm: { prediction: modelVotes[2].prediction, confidence: modelVotes[2].confidence },
         classProbabilities,
         modelReasoning: modelVotes.map((vote) => ({
           model: vote.model,
@@ -508,6 +789,14 @@ export default function App() {
           confidence: vote.confidence,
           reasons: vote.reasons,
         })),
+        systemMode: {
+          degradedMode,
+          lowTrust,
+          manualReviewRequired: lowTrust,
+          healthyModels: activeModelVotes.length,
+          unavailableModels,
+          reason: modeReason,
+        },
         anomalyScore: {
           overallScore: zeroDay.overallScore,
           isZeroDay: zeroDay.isZeroDay,
@@ -519,6 +808,14 @@ export default function App() {
         topAnomalousFeatures: zeroDay.topAnomalousFeatures
       };
 
+      setDriftQualityState((prev) =>
+        updateDriftQualityState(prev, inputData, {
+          confidence: result.confidence,
+          lowTrust,
+          degradedMode,
+          timestamp: result.timestamp,
+        }),
+      );
       setCurrentPrediction(result);
       setPredictionLogs(prev => [result, ...prev].slice(0, 20));
       
@@ -641,67 +938,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const handlePredictionFeedback = (isCorrect: boolean) => {
-    if (!currentPrediction) return;
-    const isAttackPrediction = currentPrediction.prediction !== 'Normal';
-    const outcome: FeedbackEntry['outcome'] = isCorrect
-      ? isAttackPrediction
-        ? 'True Positive'
-        : 'True Negative'
-      : isAttackPrediction
-        ? 'False Positive'
-        : 'False Negative';
-
-    const entry: FeedbackEntry = {
-      id: `${currentPrediction.timestamp}-${Date.now()}`,
-      predictionTimestamp: currentPrediction.timestamp,
-      feedbackTimestamp: new Date().toISOString(),
-      prediction: currentPrediction.prediction,
-      confidence: currentPrediction.confidence,
-      userFeedback: isCorrect ? 'Correct' : 'Wrong',
-      outcome,
-      featureSnapshot: lastInputData ? JSON.stringify(lastInputData) : undefined,
-    };
-
-    setFeedbackLogs((prev) => [
-      entry,
-      ...prev.filter((item) => item.predictionTimestamp !== currentPrediction.timestamp),
-    ]);
-  };
-
-  const exportFeedbackCSV = () => {
-    const csv = [
-      [
-        'PredictionTimestamp',
-        'FeedbackTimestamp',
-        'Prediction',
-        'Confidence',
-        'UserFeedback',
-        'Outcome',
-        'FeatureSnapshot',
-      ],
-      ...feedbackLogs.map((entry) => [
-        entry.predictionTimestamp,
-        entry.feedbackTimestamp,
-        entry.prediction,
-        entry.confidence.toFixed(2),
-        entry.userFeedback,
-        entry.outcome,
-        entry.featureSnapshot ? `"${entry.featureSnapshot.replace(/"/g, '""')}"` : '',
-      ]),
-    ]
-      .map((row) => row.join(','))
-      .join('\n');
-
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'prediction_feedback.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 dark:from-slate-900 dark:to-slate-800">
       {/* Loading Overlay */}
@@ -733,7 +969,7 @@ export default function App() {
               <Shield className="size-10 text-white" />
             </div>
             <h1 className="text-5xl font-bold bg-gradient-to-r from-indigo-600 to-cyan-500 bg-clip-text text-transparent">
-              Cyber Defense AI
+              Cyber Security
             </h1>
           </div>
           <p className="text-lg text-muted-foreground">
@@ -752,13 +988,168 @@ export default function App() {
           </div>
         </div>
 
+        <Card className="p-6 mb-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold">Service Heartbeat & Failover</h2>
+              <p className="text-sm text-muted-foreground">
+                Heartbeat every {HEARTBEAT_INTERVAL_MS / 1000}s. Service marked unhealthy after {HEARTBEAT_TIMEOUT_MS / 1000}s without heartbeat.
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3 mt-4">
+            {SERVICES.map((service) => {
+              const info = serviceHeartbeats[service];
+              return (
+                <div key={service} className="rounded-lg border p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold capitalize">{service}</span>
+                    <span
+                      className={`inline-block h-2.5 w-2.5 rounded-full ${
+                        info.healthy ? 'bg-emerald-500' : 'bg-red-500'
+                      }`}
+                    />
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {info.healthy ? 'Healthy' : info.muted ? 'Paused' : 'Heartbeat timeout'}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Last: {getLastHeartbeatAge(info.lastHeartbeat)}s ago
+                  </div>
+                  <div className="text-xs text-muted-foreground mb-2">Latency: {info.latencyMs}ms</div>
+                  {service.startsWith('model-') && (
+                    <Button
+                      size="sm"
+                      variant={info.muted ? 'default' : 'outline'}
+                      onClick={() => toggleServiceHeartbeat(service)}
+                      className="w-full"
+                    >
+                      {info.muted ? 'Resume Heartbeat' : 'Pause Heartbeat'}
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-5 rounded-lg border p-4 bg-slate-50/70 dark:bg-slate-900/40">
+            <h3 className="text-sm font-semibold mb-3">Manual Trigger Input</h3>
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+              <div className="md:col-span-2">
+                <label className="text-xs text-muted-foreground mb-1 block">Service</label>
+                <select
+                  value={triggerService}
+                  onChange={(e) => setTriggerService(e.target.value as ServiceName)}
+                  className="h-9 w-full rounded-md border border-input bg-input-background px-3 text-sm"
+                >
+                  {SERVICES.map((service) => (
+                    <option key={service} value={service}>
+                      {service}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="md:col-span-2">
+                <label className="text-xs text-muted-foreground mb-1 block">Trigger Reason</label>
+                <Input
+                  value={triggerReason}
+                  onChange={(e) => setTriggerReason(e.target.value)}
+                  placeholder="Reason for drill or failover simulation"
+                />
+              </div>
+              <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2 items-end">
+                <Button variant="destructive" className="w-full" onClick={triggerServiceDown}>
+                  Trigger Down
+                </Button>
+                <Button variant="default" className="w-full" onClick={triggerServiceRecover}>
+                  Trigger Recover
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-3 mt-3">
+              <div className="md:col-span-3 flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={autoTriggerEnabled ? 'destructive' : 'outline'}
+                  onClick={() => setAutoTriggerEnabled((prev) => !prev)}
+                >
+                  {autoTriggerEnabled ? 'Stop Auto Trigger' : 'Start Auto Trigger'}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  Random model outage/recovery drill
+                </span>
+              </div>
+              <div className="md:col-span-3">
+                <label className="text-xs text-muted-foreground mb-1 block">Auto Trigger Interval (sec, min 5)</label>
+                <Input
+                  type="number"
+                  min="5"
+                  step="1"
+                  value={autoTriggerIntervalSeconds}
+                  onChange={(e) => handleAutoTriggerIntervalChange(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold">Service Transition Alerts</h3>
+              <Button variant="outline" size="sm" onClick={() => setServiceAlerts([])} disabled={serviceAlerts.length === 0}>
+                Clear Alerts
+              </Button>
+            </div>
+            <div className="max-h-56 overflow-y-auto rounded-lg border divide-y">
+              {serviceAlerts.length === 0 ? (
+                <div className="p-3 text-sm text-muted-foreground">No transition alerts yet.</div>
+              ) : (
+                serviceAlerts.map((alert) => (
+                  <div key={alert.id} className="p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-mono text-muted-foreground">
+                        {new Date(alert.timestamp).toLocaleTimeString()}
+                      </span>
+                      <span className="text-xs font-semibold uppercase tracking-wide">
+                        {alert.source}
+                      </span>
+                      <span className="text-sm font-semibold">
+                        {alert.service}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {alert.from} -&gt; {alert.to}
+                      </span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1">{alert.reason}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </Card>
+
+        <DriftQualityMonitorPanel snapshot={driftQualityState} />
+
         {/* Prediction Result */}
         {currentPrediction && (
           <>
             <AttackStatusBanner
               prediction={currentPrediction.prediction}
               confidence={currentPrediction.confidence}
+              degradedMode={currentPrediction.systemMode?.degradedMode}
+              lowTrust={currentPrediction.systemMode?.lowTrust}
+              manualReviewRequired={currentPrediction.systemMode?.manualReviewRequired}
+              healthyModels={currentPrediction.systemMode?.healthyModels}
             />
+            {currentPrediction.systemMode?.degradedMode && (
+              <Card className="p-4 mt-4 border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700">
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">Failover Active</p>
+                <p className="text-sm text-amber-700 dark:text-amber-300">
+                  {currentPrediction.systemMode.reason || 'System is using healthy-model failover voting.'}
+                </p>
+              </Card>
+            )}
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-6">
               {/* Model Voting Chart */}
@@ -770,6 +1161,7 @@ export default function App() {
                 lstmPrediction={currentPrediction.lstm.prediction}
                 lstmConfidence={currentPrediction.lstm.confidence}
                 finalPrediction={currentPrediction.prediction}
+                activeModels={currentPrediction.systemMode?.healthyModels ?? 3}
               />
 
               <AttackProbabilityTable
@@ -856,23 +1248,6 @@ export default function App() {
         </div>
 
         <div className="mt-6">
-          <PredictionFeedback
-            currentPrediction={
-              currentPrediction
-                ? {
-                    timestamp: currentPrediction.timestamp,
-                    prediction: currentPrediction.prediction,
-                    confidence: currentPrediction.confidence,
-                  }
-                : null
-            }
-            feedbackLogs={feedbackLogs}
-            onMarkFeedback={handlePredictionFeedback}
-            onExportFeedback={exportFeedbackCSV}
-          />
-        </div>
-
-        <div className="mt-6">
           <IncidentTimeline logs={predictionLogs} />
         </div>
 
@@ -885,28 +1260,6 @@ export default function App() {
           <NetworkInputForm onSubmit={handlePredict} isLoading={isLoading} />
         </div>
 
-        {/* Info Card */}
-        <Card className="p-6 mt-6 bg-blue-50 dark:bg-slate-800/70 border-blue-200 dark:border-slate-600">
-          <div className="flex gap-3">
-            <AlertTriangle className="size-6 text-blue-600 flex-shrink-0" />
-            <div>
-              <h4 className="font-semibold mb-2">About This System</h4>
-              <p className="text-sm text-muted-foreground mb-3">
-                This advanced intrusion detection system uses a hybrid ensemble approach combining 
-                MLP, CNN, and LSTM models. It can detect:
-              </p>
-              <ul className="text-sm text-muted-foreground space-y-1 ml-4">
-                <li>✅ <strong>Normal traffic</strong> - Baseline network behavior</li>
-                <li>🔴 <strong>Known attacks</strong> - DDoS, Brute Force, Ransomware</li>
-                <li>🟣 <strong>Zero-Day attacks</strong> - Previously unseen threats using anomaly detection</li>
-              </ul>
-              <p className="text-sm text-muted-foreground mt-3">
-                The system uses multiple anomaly detection techniques including autoencoder reconstruction error, 
-                isolation forest scoring, and statistical deviation analysis to identify unknown attack patterns.
-              </p>
-            </div>
-          </div>
-        </Card>
 
       </div>
     </div>

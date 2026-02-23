@@ -11,6 +11,7 @@ interface ModelVotingChartProps {
   lstmPrediction: string;
   lstmConfidence: number;
   finalPrediction: string;
+  activeModels?: number;
 }
 
 export function ModelVotingChart({
@@ -20,10 +21,12 @@ export function ModelVotingChart({
   cnnConfidence,
   lstmPrediction,
   lstmConfidence,
-  finalPrediction
+  finalPrediction,
+  activeModels = 3,
 }: ModelVotingChartProps) {
   const votes = [mlpPrediction, cnnPrediction, lstmPrediction];
-  const finalVoteCount = votes.filter((vote) => vote === finalPrediction).length;
+  const activeVotes = votes.filter((vote) => vote !== 'Offline');
+  const finalVoteCount = activeVotes.filter((vote) => vote === finalPrediction).length;
 
   const data = [
     { model: 'MLP', confidence: mlpConfidence, prediction: mlpPrediction },
@@ -38,8 +41,14 @@ export function ModelVotingChart({
       case 'Brute Force': return '#f59e0b';
       case 'Ransomware': return '#6366f1';
       case 'Zero-Day': return '#a855f7';
+      case 'Offline': return '#94a3b8';
       default: return '#64748b';
     }
+  };
+
+  const getBadgeVariant = (prediction: string): 'default' | 'destructive' | 'secondary' | 'outline' => {
+    if (prediction === 'Offline') return 'outline';
+    return prediction === 'Normal' ? 'default' : 'destructive';
   };
 
   return (
@@ -75,7 +84,7 @@ export function ModelVotingChart({
       <div className="grid grid-cols-3 gap-3 mt-4">
         <div className="text-center p-3 bg-blue-50 dark:bg-blue-950/20 rounded-lg">
           <div className="text-xs text-muted-foreground mb-1">MLP</div>
-          <Badge variant={mlpPrediction === 'Normal' ? 'default' : 'destructive'} className="text-xs">
+          <Badge variant={getBadgeVariant(mlpPrediction)} className="text-xs">
             {mlpPrediction}
           </Badge>
           <div className="text-sm font-semibold mt-1">{mlpConfidence.toFixed(1)}%</div>
@@ -83,7 +92,7 @@ export function ModelVotingChart({
 
         <div className="text-center p-3 bg-purple-50 dark:bg-purple-950/20 rounded-lg">
           <div className="text-xs text-muted-foreground mb-1">CNN</div>
-          <Badge variant={cnnPrediction === 'Normal' ? 'default' : 'destructive'} className="text-xs">
+          <Badge variant={getBadgeVariant(cnnPrediction)} className="text-xs">
             {cnnPrediction}
           </Badge>
           <div className="text-sm font-semibold mt-1">{cnnConfidence.toFixed(1)}%</div>
@@ -91,7 +100,7 @@ export function ModelVotingChart({
 
         <div className="text-center p-3 bg-green-50 dark:bg-green-950/20 rounded-lg">
           <div className="text-xs text-muted-foreground mb-1">LSTM</div>
-          <Badge variant={lstmPrediction === 'Normal' ? 'default' : 'destructive'} className="text-xs">
+          <Badge variant={getBadgeVariant(lstmPrediction)} className="text-xs">
             {lstmPrediction}
           </Badge>
           <div className="text-sm font-semibold mt-1">{lstmConfidence.toFixed(1)}%</div>
@@ -102,8 +111,13 @@ export function ModelVotingChart({
       <div className="mt-4 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
         <div className="text-sm text-muted-foreground mb-1">Ensemble Decision</div>
         <div className="text-lg font-bold">
-          Majority Vote: {finalPrediction} ({finalVoteCount}/3)
+          Majority Vote: {finalPrediction} ({finalVoteCount}/{Math.max(activeModels, 1)})
         </div>
+        {activeModels < 3 && (
+          <div className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+            Degraded mode: {activeModels} model(s) available for voting.
+          </div>
+        )}
       </div>
     </Card>
   );

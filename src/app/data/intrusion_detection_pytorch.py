@@ -12,6 +12,8 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
+import argparse
+import json
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
@@ -19,6 +21,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import joblib
 import time
 from typing import Tuple, Dict
+from pathlib import Path
 
 # Set random seeds for reproducibility
 torch.manual_seed(42)
@@ -207,16 +210,58 @@ def create_sample_dataset(n_samples=10000):
     return df
 
 
+def generate_auto_dataset_csv(output_path: str, n_rows: int = 5000):
+    """Generate and persist synthetic dataset as CSV for app use."""
+    auto_df = create_sample_dataset(n_samples=n_rows)
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    auto_df.to_csv(out_path, index=False)
+    print(f"Auto-generated dataset saved to '{out_path.as_posix()}' ({len(auto_df)} rows)")
+    return auto_df, out_path.as_posix()
+
+
+def load_dataset(dataset_path: str, fallback_samples: int = 10000):
+    """Load dataset from CSV when available, else fallback to synthetic data."""
+    csv_path = Path(dataset_path)
+    if csv_path.exists():
+        df = pd.read_csv(csv_path)
+
+        if 'Label' not in df.columns:
+            if 'Attack_Type' in df.columns:
+                df['Label'] = (df['Attack_Type'].astype(str).str.lower() != 'normal').astype(int)
+            else:
+                raise ValueError(
+                    f"Dataset '{dataset_path}' must include either 'Label' or 'Attack_Type' column."
+                )
+        else:
+            df['Label'] = pd.to_numeric(df['Label'], errors='coerce').fillna(0)
+            df['Label'] = (df['Label'] > 0).astype(int)
+
+        return df, f"csv:{dataset_path}"
+
+    print(f"Dataset not found at '{dataset_path}'. Falling back to synthetic dataset.")
+    return create_sample_dataset(n_samples=fallback_samples), "synthetic"
+
+
 def preprocess_data(df, preprocessor=None, is_training=True):
     """Preprocess the intrusion detection data"""
     
     # Drop irrelevant columns
-    columns_to_drop = ['IP_Address', 'Timestamp', 'Attack_Type']
+    columns_to_drop = [
+        'IP_Address',
+        'Source_IP',
+        'Destination_IP',
+        'Timestamp',
+        'Attack_Type',
+    ]
     df_processed = df.drop(columns=[col for col in columns_to_drop if col in df.columns])
     
     # Separate features and target
-    X = df_processed.drop('Label', axis=1)
-    y = df_processed['Label'].values
+    X = df_processed.drop(columns=['Label'], errors='ignore')
+    if 'Label' in df_processed.columns:
+        y = df_processed['Label'].values
+    else:
+        y = np.zeros(len(df_processed), dtype=int)
     
     # Identify numeric and categorical columns
     numeric_features = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
@@ -320,6 +365,24 @@ def evaluate_ensemble(ensemble, test_loader, y_test):
     }
 
 
+def write_training_metrics(metrics: Dict, output_path: str, metadata: Dict):
+    """Persist training metrics for React UI consumption."""
+    payload = {
+        'accuracy': float(metrics['accuracy']),
+        'accuracy_percent': round(float(metrics['accuracy']) * 100, 2),
+        'precision': float(metrics['precision']),
+        'recall': float(metrics['recall']),
+        'f1': float(metrics['f1']),
+        'confusion_matrix': metrics['confusion_matrix'].tolist(),
+        **metadata,
+    }
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+    print(f"Training metrics saved to '{out_path.as_posix()}'")
+
+
 # ============================================================================
 # 7. INFERENCE FUNCTION
 # ============================================================================
@@ -354,10 +417,17 @@ def predict_intrusion(sample_data, ensemble, preprocessor):
 # 8. MAIN TRAINING PIPELINE
 # ============================================================================
 
-def main():
+def main(
+    dataset_path: str = 'dist/datasets/cyberfeddefender_dataset.csv',
+    epochs: int = 50,
+    metrics_output_path: str = 'public/pytorch-training-metrics.json',
+    fallback_samples: int = 10000,
+    auto_generated_rows: int = 5000,
+    auto_dataset_csv_path: str = 'public/datasets/auto_generated_dataset.csv',
+):
     # Configuration
     BATCH_SIZE = 32
-    EPOCHS = 50
+    EPOCHS = epochs
     LEARNING_RATE = 0.001
     
     print("="*60)
@@ -366,9 +436,16 @@ def main():
     
     # 1. Create/Load Dataset
     print("\n[1/8] Loading dataset...")
-    df = create_sample_dataset(n_samples=10000)
+    df, dataset_source = load_dataset(dataset_path, fallback_samples=fallback_samples)
     print(f"Dataset shape: {df.shape}")
-    print(f"Attack samples: {df['Label'].sum()}, Normal samples: {(1-df['Label']).sum()}")
+    print(f"Dataset source: {dataset_source}")
+    print(f"Attack samples: {int(df['Label'].sum())}, Normal samples: {int((1-df['Label']).sum())}")
+
+    # 1b. Generate additional auto dataset as CSV (5000 rows by default)
+    auto_df, auto_dataset_output = generate_auto_dataset_csv(
+        output_path=auto_dataset_csv_path,
+        n_rows=auto_generated_rows,
+    )
     
     # 2. Preprocess Data
     print("\n[2/8] Preprocessing data...")
@@ -418,6 +495,19 @@ def main():
     # 8. Evaluate
     print("\n[8/8] Evaluating ensemble...")
     metrics = evaluate_ensemble(ensemble, test_loader, y_test)
+
+    training_metadata = {
+        'dataset_rows': int(len(df)),
+        'auto_generated_rows': int(len(auto_df)),
+        'total_dataset_rows': int(len(df) + len(auto_df)),
+        'train_rows': int(len(X_train)),
+        'test_rows': int(len(X_test)),
+        'dataset_source': dataset_source,
+        'auto_dataset_csv': auto_dataset_output,
+        'epochs': int(EPOCHS),
+        'trained_at': pd.Timestamp.utcnow().isoformat(),
+    }
+    write_training_metrics(metrics, metrics_output_path, training_metadata)
     
     # 9. Save Models
     print("\nSaving models...")
@@ -434,36 +524,23 @@ def main():
     print("\n" + "="*60)
     print("EXAMPLE PREDICTION")
     print("="*60)
-    
-    # Create a test sample
-    test_sample = pd.DataFrame({
-        'Duration': [850],
-        'Protocol': ['TCP'],
-        'Service': ['HTTP'],
-        'Flag': ['SF'],
-        'Src_Bytes': [5000],
-        'Dst_Bytes': [8000],
-        'Count': [150],
-        'Srv_Count': [120],
-        'Serror_Rate': [0.8],
-        'Rerror_Rate': [0.1],
-        'Same_Srv_Rate': [0.9],
-        'Diff_Srv_Rate': [0.05],
-        'IP_Address': ['192.168.1.100'],
-        'Timestamp': [pd.Timestamp.now()],
-        'Attack_Type': ['Unknown']
-    })
-    
-    results = predict_intrusion(test_sample, ensemble, preprocessor)
-    
-    for i, result in enumerate(results):
-        print(f"\nSample {i+1}:")
-        print(f"  Final Prediction: {result['prediction']}")
-        print(f"  Confidence: {result['confidence']*100:.2f}%")
-        print(f"  MLP Probability: {result['mlp_probability']:.4f}")
-        print(f"  CNN Probability: {result['cnn_probability']:.4f}")
-        print(f"  LSTM Probability: {result['lstm_probability']:.4f}")
-        print(f"  Inference Time: {result['inference_time_ms']:.2f}ms")
+    try:
+        # Use one row from the loaded dataset to keep schema aligned.
+        test_sample = df.head(1).copy()
+        if 'Label' in test_sample.columns:
+            test_sample = test_sample.drop(columns=['Label'])
+        results = predict_intrusion(test_sample, ensemble, preprocessor)
+
+        for i, result in enumerate(results):
+            print(f"\nSample {i+1}:")
+            print(f"  Final Prediction: {result['prediction']}")
+            print(f"  Confidence: {result['confidence']*100:.2f}%")
+            print(f"  MLP Probability: {result['mlp_probability']:.4f}")
+            print(f"  CNN Probability: {result['cnn_probability']:.4f}")
+            print(f"  LSTM Probability: {result['lstm_probability']:.4f}")
+            print(f"  Inference Time: {result['inference_time_ms']:.2f}ms")
+    except Exception as exc:
+        print(f"Example prediction skipped due to schema mismatch: {exc}")
     
     print("\n" + "="*60)
     print("TRAINING COMPLETE!")
@@ -471,6 +548,7 @@ def main():
     print("\nSaved files:")
     print("  - cyber_defense_torch_parts.pth (PyTorch models)")
     print("  - preprocessor.pkl (Data preprocessor)")
+    print(f"  - {metrics_output_path} (React training metrics)")
     
 
 # ============================================================================
@@ -539,8 +617,53 @@ def load_and_predict():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Train voting-based PyTorch intrusion model and export metrics for React UI.",
+    )
+    parser.add_argument(
+        '--dataset-path',
+        default='dist/datasets/cyberfeddefender_dataset.csv',
+        help="Path to CSV dataset file.",
+    )
+    parser.add_argument(
+        '--epochs',
+        type=int,
+        default=8,
+        help="Training epochs for each model (MLP/CNN/LSTM).",
+    )
+    parser.add_argument(
+        '--metrics-out',
+        default='public/pytorch-training-metrics.json',
+        help="Output JSON path for frontend metrics.",
+    )
+    parser.add_argument(
+        '--fallback-samples',
+        type=int,
+        default=10000,
+        help="Synthetic sample size when CSV dataset path is missing.",
+    )
+    parser.add_argument(
+        '--auto-generated-rows',
+        type=int,
+        default=5000,
+        help="Rows to generate for auto-generated CSV dataset.",
+    )
+    parser.add_argument(
+        '--auto-dataset-csv',
+        default='public/datasets/auto_generated_dataset.csv',
+        help="Output CSV path for auto-generated dataset.",
+    )
+    args = parser.parse_args()
+
     # Run main training pipeline
-    main()
+    main(
+        dataset_path=args.dataset_path,
+        epochs=args.epochs,
+        metrics_output_path=args.metrics_out,
+        fallback_samples=args.fallback_samples,
+        auto_generated_rows=args.auto_generated_rows,
+        auto_dataset_csv_path=args.auto_dataset_csv,
+    )
     
     # Uncomment to test loading and inference
     # load_and_predict()

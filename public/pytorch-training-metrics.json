@@ -1,0 +1,26 @@
+{
+  "accuracy": 0.4230769230769231,
+  "accuracy_percent": 43.31,
+  "precision": 0.39669421487603307,
+  "recall": 0.34285714285714286,
+  "f1": 0.367816091954023,
+  "confusion_matrix": [
+    [
+      73,
+      73
+    ],
+    [
+      92,
+      48
+    ]
+  ],
+  "dataset_rows": 1430,
+  "auto_generated_rows": 5000,
+  "total_dataset_rows": 6430,
+  "train_rows": 1144,
+  "test_rows": 286,
+  "dataset_source": "csv:dist/datasets/cyberfeddefender_dataset.csv",
+  "auto_dataset_csv": "public/datasets/auto_generated_dataset.csv",
+  "epochs": 8,
+  "trained_at": "2026-02-23T12:57:49.829634+00:00"
+}

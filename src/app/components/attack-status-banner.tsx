@@ -5,9 +5,20 @@ import { Shield, AlertTriangle, Activity } from 'lucide-react';
 interface AttackStatusBannerProps {
   prediction: string;
   confidence: number;
+  degradedMode?: boolean;
+  lowTrust?: boolean;
+  manualReviewRequired?: boolean;
+  healthyModels?: number;
 }
 
-export function AttackStatusBanner({ prediction, confidence }: AttackStatusBannerProps) {
+export function AttackStatusBanner({
+  prediction,
+  confidence,
+  degradedMode = false,
+  lowTrust = false,
+  manualReviewRequired = false,
+  healthyModels = 3,
+}: AttackStatusBannerProps) {
   const isAttack = prediction !== 'Normal';
   const isZeroDay = prediction === 'Zero-Day';
 
@@ -29,6 +40,26 @@ export function AttackStatusBanner({ prediction, confidence }: AttackStatusBanne
       </div>
 
       <div className="relative px-8 py-12">
+        {(degradedMode || lowTrust) && (
+          <div className="mb-5 flex flex-wrap gap-2">
+            {degradedMode && (
+              <span className="inline-flex items-center rounded-full bg-yellow-400/25 px-3 py-1 text-sm font-semibold text-yellow-100">
+                DEGRADED MODE ({healthyModels}/3 models online)
+              </span>
+            )}
+            {lowTrust && (
+              <span className="inline-flex items-center rounded-full bg-orange-400/25 px-3 py-1 text-sm font-semibold text-orange-100">
+                LOW TRUST
+              </span>
+            )}
+            {manualReviewRequired && (
+              <span className="inline-flex items-center rounded-full bg-white/20 px-3 py-1 text-sm font-semibold text-white">
+                Manual Review Required
+              </span>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center justify-between">
           
           {/* Left side - Status */}
@@ -53,6 +84,11 @@ export function AttackStatusBanner({ prediction, confidence }: AttackStatusBanne
               <div className="text-white/90 text-xl mt-2 font-medium">
                 {prediction} {isAttack && `Attack`}
               </div>
+              {lowTrust && (
+                <div className="text-orange-100 text-sm mt-2 font-semibold">
+                  Confidence reduced because insufficient healthy model votes.
+                </div>
+              )}
             </div>
           </div>
 
