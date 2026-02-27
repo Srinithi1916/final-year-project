@@ -15,6 +15,7 @@ import { VoteReasonPanel } from './components/vote-reason-panel';
 import { IncidentTimeline } from './components/incident-timeline';
 import { TopRiskPorts } from './components/top-risk-ports';
 import { DriftQualityMonitorPanel } from './components/drift-quality-monitor-panel';
+import { TransferIntegrityPanel } from './components/transfer-integrity-panel';
 import { detectZeroDay } from './utils/anomaly-detection';
 import {
   createInitialDriftQualityState,
@@ -1130,6 +1131,7 @@ export default function App() {
         </Card>
 
         <DriftQualityMonitorPanel snapshot={driftQualityState} />
+        <TransferIntegrityPanel />
 
         {/* Prediction Result */}
         {currentPrediction && (

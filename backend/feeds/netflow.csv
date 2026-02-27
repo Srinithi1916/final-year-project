@@ -1,0 +1,6 @@
+timestamp,protocol,src_port,dst_port,duration_ms,packets,bytes,flows,syn,ack,rst,error_rate,retransmission_rate,dns_query_count,payload_entropy,unique_destination_ips,login_attempts,cpu_usage,memory_usage,disk_write_rate,attack_type
+2026-02-27T10:02:00Z,TCP,51022,443,2200,420,28000,120,120,240,6,0.03,0.02,40,2.2,22,2,26,38,5,Normal
+2026-02-27T10:02:05Z,TCP,40220,80,700,28000,420000,8500,20000,240,6400,0.91,0.96,4,1.1,1300,480,84,71,3,DDoS
+2026-02-27T10:02:10Z,TCP,60022,22,1800,5200,36000,980,1400,480,920,0.82,0.40,2,3.5,24,1500,63,55,7,Brute Force
+2026-02-27T10:02:15Z,TCP,51119,445,26000,12000,260000,620,3800,16800,240,0.09,0.12,65,8.1,360,34,92,88,260,Ransomware
+2026-02-27T10:02:20Z,UDP,65000,9999,3000,36000,980000,56000,22000,9800,25000,0.72,0.66,420,9.7,920,92,98,96,310,Zero-Day

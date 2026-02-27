@@ -7,6 +7,9 @@
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
+    "telemetry:server": "node backend/telemetry-server.mjs",
+    "transfer:server": "node backend/file-transfer-server.mjs",
+    "transfer:send": "node backend/send-file.mjs",
     "train:pytorch": "python src/app/data/intrusion_detection_pytorch.py --dataset-path dist/datasets/cyberfeddefender_dataset.csv --epochs 8 --metrics-out public/pytorch-training-metrics.json --auto-generated-rows 5000 --auto-dataset-csv public/datasets/auto_generated_dataset.csv"
   },
   "dependencies": {
@@ -65,7 +68,8 @@
     "sonner": "2.0.3",
     "tailwind-merge": "3.2.0",
     "tw-animate-css": "1.3.8",
-    "vaul": "1.1.2"
+    "vaul": "1.1.2",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.12",

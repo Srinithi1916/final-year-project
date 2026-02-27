@@ -13,6 +13,12 @@ type SampleType = 'normal' | 'ddos' | 'brute' | 'ransomware' | 'zeroday';
 type DatasetBuckets = Record<SampleType, Record<string, string>[]>;
 type FormRow = Record<string, string>;
 type StreamMode = 'dataset' | 'random5000';
+type TransferDirection = 'send' | 'receive';
+
+interface TransferFileRow {
+  row: FormRow;
+  forcedClass: number | null;
+}
 
 const FORCED_CLASS_BY_SAMPLE: Record<SampleType, number> = {
   normal: 0,
@@ -326,6 +332,81 @@ const parseCsvDataset = (csv: string): { buckets: DatasetBuckets; allRows: FormR
   return { buckets, allRows };
 };
 
+const mapDirectFeatureRowToForm = (row: Record<string, string>): FormRow => {
+  const mapped = { ...BASE_SAMPLES.normal };
+  ALL_NETWORK_FIELDS.forEach((field) => {
+    mapped[field] = toNumberString(row[field], mapped[field]);
+  });
+  return mapped;
+};
+
+const parseTransferRowsFromCsv = (csv: string): TransferFileRow[] => {
+  const lines = csv.trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+
+  const headers = lines[0].split(',').map((h) => h.trim());
+  const hasDirectFeatureColumns = ALL_NETWORK_FIELDS.every((field) => headers.includes(field));
+  const rows: TransferFileRow[] = [];
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const values = lines[i].split(',');
+    if (values.length < headers.length) continue;
+
+    const raw: Record<string, string> = {};
+    headers.forEach((header, idx) => {
+      raw[header] = (values[idx] || '').trim();
+    });
+
+    const attackTypeValue = raw.Attack_Type || raw.attack_type || raw.Label || raw.label || '';
+    const normalizedAttack = normalizeAttackType(attackTypeValue);
+    const forcedClass =
+      normalizedAttack !== null ? FORCED_CLASS_BY_SAMPLE[normalizedAttack] : null;
+    const mapped = hasDirectFeatureColumns
+      ? mapDirectFeatureRowToForm(raw)
+      : mapCsvRowToForm(raw, normalizedAttack ?? 'normal');
+
+    rows.push({
+      row: mapped,
+      forcedClass,
+    });
+  }
+
+  return rows;
+};
+
+const buildTransferRowsFromFileMetadata = (file: File): TransferFileRow[] => {
+  const extension = (file.name.split('.').pop() || 'bin').toLowerCase();
+  const sizeKb = Math.max(1, Math.round(file.size / 1024));
+  const entropyBoost = ['exe', 'dll', 'ps1', 'bat', 'bin', 'jar'].includes(extension) ? 2.2 : 0.8;
+  const baseRate = Math.min(5000, 600 + sizeKb * 4);
+
+  return Array.from({ length: 24 }, (_, idx) => {
+    const row = { ...BASE_SAMPLES.normal };
+    const ramp = 1 + idx * 0.06;
+    row.Duration = String(100 + idx * 25);
+    row.Packet_Rate = String(Math.round(baseRate * ramp));
+    row.Byte_Rate = String(Math.round(baseRate * 2.8 * ramp));
+    row.Connection_Count = String(Math.round(80 + idx * 18));
+    row.Active_Connections = String(Math.round(40 + idx * 10));
+    row.Failed_Connections = String(Math.round(Math.max(0, idx - 8) * 2));
+    row.Error_Rate = (0.02 + idx * 0.004).toFixed(2);
+    row.Retransmission_Rate = (0.03 + idx * 0.003).toFixed(2);
+    row.Bytes_Transferred = String(Math.round(baseRate * 7 * ramp));
+    row.Bytes_Received = String(Math.round(baseRate * 5 * ramp));
+    row.SYN_Count = String(Math.round(150 + idx * 30));
+    row.ACK_Count = String(Math.round(220 + idx * 35));
+    row.RST_Count = String(Math.max(1, Math.round(idx * 1.4)));
+    row.DNS_Query_Count = String(20 + idx * 3);
+    row.Payload_Entropy = Math.min(9.9, 4.1 + entropyBoost + idx * 0.06).toFixed(2);
+    row.Source_Port = String(Math.min(65535, 20000 + idx * 37));
+    row.Destination_Port = String(Math.min(65535, 30000 + idx * 29));
+    return {
+      row,
+      forcedClass: null,
+    };
+  });
+};
+
 export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps) {
   const [formData, setFormData] = React.useState<Record<string, string>>(BASE_SAMPLES.normal);
   const [datasetSamples, setDatasetSamples] = React.useState<DatasetBuckets>(createEmptyBuckets());
@@ -336,6 +417,14 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
   const [hasStreamStarted, setHasStreamStarted] = React.useState(false);
   const [streamIntervalSeconds, setStreamIntervalSeconds] = React.useState(5);
   const [streamMode, setStreamMode] = React.useState<StreamMode>('dataset');
+  const [transferRows, setTransferRows] = React.useState<TransferFileRow[]>([]);
+  const [transferFileName, setTransferFileName] = React.useState('');
+  const [transferDirection, setTransferDirection] = React.useState<TransferDirection>('send');
+  const [isTransferRunning, setIsTransferRunning] = React.useState(false);
+  const [hasTransferStarted, setHasTransferStarted] = React.useState(false);
+  const [transferCursor, setTransferCursor] = React.useState(0);
+  const [transferIntervalSeconds, setTransferIntervalSeconds] = React.useState(1);
+  const [transferError, setTransferError] = React.useState<string | null>(null);
   const [forcedClassHint, setForcedClassHint] = React.useState<number | null>(null);
   const [sampleIndex, setSampleIndex] = React.useState<Record<SampleType, number>>({
     normal: 0,
@@ -350,6 +439,8 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
   const isLoadingRef = React.useRef(isLoading);
   const streamRunnerRef = React.useRef<() => void>(() => {});
   const streamKickoffDoneRef = React.useRef(false);
+  const transferRunnerRef = React.useRef<() => void>(() => {});
+  const transferKickoffDoneRef = React.useRef(false);
 
   React.useEffect(() => {
     forcedClassHintRef.current = forcedClassHint;
@@ -535,6 +626,57 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
     setIsLiveStreaming(true);
   }, [datasetLoaded, allDatasetRows.length, streamMode]);
 
+  const runNextTransferRowAndPredict = React.useCallback(() => {
+    if (isLoadingRef.current || transferRows.length === 0) return;
+
+    let reachedEnd = false;
+    setTransferCursor((prev) => {
+      if (prev >= transferRows.length) {
+        reachedEnd = true;
+        return prev;
+      }
+
+      const position = transferDirection === 'send' ? prev : transferRows.length - 1 - prev;
+      const nextPacket = transferRows[position];
+      setFormData(nextPacket.row);
+      setForcedClassHint(nextPacket.forcedClass);
+      submitForPrediction(nextPacket.row, nextPacket.forcedClass, true);
+
+      const next = prev + 1;
+      reachedEnd = next >= transferRows.length;
+      return next;
+    });
+
+    if (reachedEnd) {
+      setIsTransferRunning(false);
+    }
+  }, [submitForPrediction, transferRows, transferDirection]);
+
+  React.useEffect(() => {
+    transferRunnerRef.current = runNextTransferRowAndPredict;
+  }, [runNextTransferRowAndPredict]);
+
+  React.useEffect(() => {
+    if (!isTransferRunning || transferRows.length === 0) {
+      transferKickoffDoneRef.current = false;
+      return;
+    }
+
+    if (!transferKickoffDoneRef.current) {
+      transferKickoffDoneRef.current = true;
+      transferRunnerRef.current();
+    }
+
+    const intervalMs = Math.max(1, transferIntervalSeconds) * 1000;
+    const timerId = window.setInterval(() => {
+      transferRunnerRef.current();
+    }, intervalMs);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [isTransferRunning, transferRows.length, transferIntervalSeconds, transferDirection]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     submitForPrediction(formData, forcedClassHint);
@@ -593,6 +735,77 @@ export function NetworkInputForm({ onSubmit, isLoading }: NetworkInputFormProps)
     setForcedClassHint(randomForcedClass);
     setFormData(row);
   };
+
+  const handleTransferIntervalChange = (value: string) => {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      setTransferIntervalSeconds(parsed);
+    }
+  };
+
+  const stopTransfer = () => {
+    setIsTransferRunning(false);
+    setHasTransferStarted(false);
+    setTransferCursor(0);
+    transferKickoffDoneRef.current = false;
+  };
+
+  const startTransfer = (direction: TransferDirection) => {
+    if (transferRows.length === 0) return;
+    if (transferCursor >= transferRows.length) {
+      setTransferCursor(0);
+    }
+    setIsLiveStreaming(false);
+    streamKickoffDoneRef.current = false;
+    setTransferDirection(direction);
+    setHasTransferStarted(true);
+    setIsTransferRunning(true);
+  };
+
+  const toggleTransferRunState = () => {
+    if (!hasTransferStarted) {
+      startTransfer('send');
+      return;
+    }
+    if (transferCursor >= transferRows.length) {
+      setTransferCursor(0);
+    }
+    setIsTransferRunning((prev) => !prev);
+  };
+
+  const handleTransferFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setTransferError(null);
+    setTransferFileName(file.name);
+    setTransferRows([]);
+    setIsTransferRunning(false);
+    setHasTransferStarted(false);
+    setTransferCursor(0);
+    transferKickoffDoneRef.current = false;
+
+    try {
+      const isCsv = file.name.toLowerCase().endsWith('.csv') || file.type === 'text/csv';
+      const parsedRows = isCsv
+        ? parseTransferRowsFromCsv(await file.text())
+        : buildTransferRowsFromFileMetadata(file);
+
+      if (parsedRows.length === 0) {
+        setTransferError('No valid rows found. Use CSV with model input fields or dataset columns.');
+        return;
+      }
+
+      setTransferRows(parsedRows);
+      setFormData(parsedRows[0].row);
+      setForcedClassHint(parsedRows[0].forcedClass);
+    } catch {
+      setTransferError('File parsing failed. Try a valid CSV file.');
+    }
+  };
+
+  const transferProgressPercent =
+    transferRows.length === 0 ? 0 : Math.min(100, (transferCursor / transferRows.length) * 100);
 
   return (
     <Card className="p-6">

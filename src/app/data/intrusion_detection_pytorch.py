@@ -665,5 +665,4 @@ if __name__ == "__main__":
         auto_dataset_csv_path=args.auto_dataset_csv,
     )
     
-    # Uncomment to test loading and inference
-    # load_and_predict()
+    
